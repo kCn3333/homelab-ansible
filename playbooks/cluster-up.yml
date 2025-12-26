@@ -1,0 +1,40 @@
+---
+- name: Wake up Cluster Nodes via Wake-on-LAN
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Try to find WoL tool
+      ansible.builtin.set_fact:
+        wol_tool: "{{ lookup('ansible.builtin.first_found', find_configs, errors='ignore') }}"
+      vars:
+        find_configs:
+          - '/usr/bin/ether-wake'
+          - '/usr/sbin/ether-wake'
+          - '/usr/bin/wakeonlan'
+      delegate_to: localhost
+
+    - name: Send Magic Packet (Alpine/ether-wake)
+      ansible.builtin.command: "ether-wake -b {{ mac_address }}"
+      when:
+        - "'ether-wake' in wol_tool"
+        - mac_address is defined
+      become: true
+      delegate_to: localhost
+      changed_when: true
+
+    - name: Send Magic Packet (Debian/wakeonlan)
+      ansible.builtin.command: "wakeonlan {{ mac_address }}"
+      when:
+        - "'wakeonlan' in wol_tool"
+        - mac_address is defined
+      delegate_to: localhost
+      changed_when: true
+
+    - name: Wait for SSH to wake up
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: started
+        delay: 5
+        timeout: 60
+      delegate_to: localhost
