@@ -1,0 +1,12 @@
+---
+# 🏓 Basic playbook to check if Ansible can connect to all hosts
+- name: 🔍 Check connection to all hosts
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: 🏓 Ping all hosts
+      ping:
+
+    - name: 📋 Display host information
+      debug:
+        msg: "✅ Connection to {{ inventory_hostname }} ({{ ansible_host }}) works!"
