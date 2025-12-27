@@ -1,0 +1,86 @@
+---
+- name: Remove MAAS Controller from Master nodes
+  hosts: master
+  become: true
+  
+  tasks:
+    - name: Stop all MAAS related services
+      ansible.builtin.shell: |
+        systemctl stop maas-* || true
+        systemctl stop postgresql || true
+      changed_when: true
+      ignore_errors: true
+
+    - name: Purge MAAS packages and dependencies
+      ansible.builtin.apt:
+        name:
+          - maas
+          - maas-region-controller
+          - maas-rack-controller
+          - maas-common
+          - postgresql*
+          - temporal*
+          - squid
+          - avahi-daemon
+        state: absent
+        purge: true
+      register: maas_purge
+
+    - name: Remove MAAS configuration and data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/maas
+        - /etc/maas
+        - /var/log/maas
+        - /var/lib/postgresql
+        - /etc/postgresql
+
+- name: Clean MAAS and Cloud-init remnants from all nodes
+  hosts: all
+  become: true
+  
+  tasks:
+    - name: Stop and disable cloud-init services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - cloud-init
+        - cloud-config
+        - cloud-final
+        - cloud-init-local
+      ignore_errors: true
+
+    - name: Remove cloud-init and MAAS client packages
+      ansible.builtin.apt:
+        name:
+          - maas-enlisted-iterm
+          - cloud-init
+        state: absent
+        purge: true
+      register: cloud_init_purge
+
+    - name: Remove cloud-init and MAAS directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cloud/
+        - /var/lib/cloud/
+        - /var/log/cloud-init.log
+        - /var/log/cloud-init-output.log
+
+    - name: Autoremove leftover packages
+      ansible.builtin.apt:
+        autoremove: true
+        purge: true
+
+    - name: Display cleanup summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} cleanup completed"
+          - "Cloud-init removed: {{ 'Yes' if cloud_init_purge.changed else 'Already clean' }}"
+          - "MAAS removed: {{ 'Yes' if maas_purge.changed | default(false) else 'Not applicable' }}"
