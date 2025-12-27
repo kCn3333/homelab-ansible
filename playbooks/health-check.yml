@@ -40,8 +40,15 @@
     - name: Check if Docker is installed
       ansible.builtin.service_facts:
 
-    - name: Get Docker status
-      ansible.builtin.command: docker ps --format "{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}"
+    - name: Get Docker container count
+      ansible.builtin.shell: docker ps -q | wc -l
+      register: docker_count
+      when: ansible_facts.services['docker.service'] is defined
+      changed_when: false
+      failed_when: false
+
+    - name: Get Docker container list
+      ansible.builtin.command: docker ps --format "table {{'{{'}} .Names {{'}}'}}\t{{'{{'}} .Status {{'}}'}}"
       register: docker_containers
       when: ansible_facts.services['docker.service'] is defined
       changed_when: false
@@ -53,6 +60,7 @@
       loop: "{{ services_to_check }}"
       register: service_status
       when: services_to_check | length > 0
+      failed_when: false
 
     - name: Display health check results
       ansible.builtin.debug:
@@ -62,7 +70,7 @@
           - "Load: {{ load_avg.stdout }}"
           - "Memory: {{ memory_usage.stdout }}"
           - "Disk: {{ disk_usage.stdout }}"
-          - "Docker: {{ 'Installed' if ansible_facts.services['docker.service'] is defined else 'Not installed' }}"
+          - "Docker: {{ 'Installed (' + docker_count.stdout + ' containers)' if ansible_facts.services['docker.service'] is defined else 'Not installed' }}"
 
     - name: Display Docker containers
       ansible.builtin.debug:
@@ -70,6 +78,7 @@
       when:
         - ansible_facts.services['docker.service'] is defined
         - docker_containers.stdout_lines is defined
+        - docker_count.stdout | int > 0
 
     - name: Create summary report
       ansible.builtin.set_fact:
@@ -80,8 +89,9 @@
           disk: "{{ disk_usage.stdout }}"
           disk_percent: "{{ disk_percent.stdout }}"
           docker_installed: "{{ ansible_facts.services['docker.service'] is defined }}"
+          docker_containers: "{{ docker_count.stdout | default('0') }}"
           status: "{{ 'WARNING' if disk_percent.stdout | int > disk_warning_threshold else 'OK' }}"
 
     - name: Display final status
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ health_report.status }}"
+        msg: "{{ inventory_hostname }}: {{ health_report.status }} (Disk: {{ health_report.disk_percent }}%, Docker: {{ health_report.docker_containers }} containers)"
