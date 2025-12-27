@@ -5,7 +5,6 @@
   vars:
     wol_timeout: 120
     wol_delay: 10
-  
   tasks:
     - name: Verify mac_address is defined
       ansible.builtin.assert:
@@ -44,7 +43,6 @@
         delay: "{{ wol_delay }}"
         timeout: "{{ wol_timeout }}"
       delegate_to: localhost
-      
     - name: Verify host is reachable
       ansible.builtin.ping:
       retries: 3

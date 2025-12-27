@@ -1,0 +1,87 @@
+---
+- name: Perform health check on nodes
+  hosts: all
+  gather_facts: true
+  vars:
+    services_to_check: []
+    disk_warning_threshold: 80
+  
+  tasks:
+    - name: Get system uptime
+      ansible.builtin.command: uptime -p
+      register: uptime_output
+      changed_when: false
+
+    - name: Get load average
+      ansible.builtin.command: uptime
+      register: load_avg
+      changed_when: false
+
+    - name: Get memory usage
+      ansible.builtin.shell: free -h | grep Mem | awk '{print "Total:"$2" Used:"$3" Free:"$4}'
+      register: memory_usage
+      changed_when: false
+
+    - name: Get disk usage
+      ansible.builtin.shell: df -h / | tail -1 | awk '{print "Size:"$2" Used:"$3" Avail:"$4" Use%:"$5}'
+      register: disk_usage
+      changed_when: false
+
+    - name: Check disk usage percentage
+      ansible.builtin.shell: df / | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: disk_percent
+      changed_when: false
+
+    - name: Warn if disk usage is high
+      ansible.builtin.debug:
+        msg: "WARNING: Disk usage is {{ disk_percent.stdout }}% on {{ inventory_hostname }}"
+      when: disk_percent.stdout | int > disk_warning_threshold
+
+    - name: Check if Docker is installed
+      ansible.builtin.service_facts:
+
+    - name: Get Docker status
+      ansible.builtin.command: docker ps --format "{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}"
+      register: docker_containers
+      when: ansible_facts.services['docker.service'] is defined
+      changed_when: false
+      failed_when: false
+
+    - name: Check specific services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      loop: "{{ services_to_check }}"
+      register: service_status
+      when: services_to_check | length > 0
+
+    - name: Display health check results
+      ansible.builtin.debug:
+        msg:
+          - "=== {{ inventory_hostname }} Health Check ==="
+          - "Uptime: {{ uptime_output.stdout }}"
+          - "Load: {{ load_avg.stdout }}"
+          - "Memory: {{ memory_usage.stdout }}"
+          - "Disk: {{ disk_usage.stdout }}"
+          - "Docker: {{ 'Installed' if ansible_facts.services['docker.service'] is defined else 'Not installed' }}"
+
+    - name: Display Docker containers
+      ansible.builtin.debug:
+        var: docker_containers.stdout_lines
+      when:
+        - ansible_facts.services['docker.service'] is defined
+        - docker_containers.stdout_lines is defined
+
+    - name: Create summary report
+      ansible.builtin.set_fact:
+        health_report:
+          hostname: "{{ inventory_hostname }}"
+          uptime: "{{ uptime_output.stdout }}"
+          memory: "{{ memory_usage.stdout }}"
+          disk: "{{ disk_usage.stdout }}"
+          disk_percent: "{{ disk_percent.stdout }}"
+          docker_installed: "{{ ansible_facts.services['docker.service'] is defined }}"
+          status: "{{ 'WARNING' if disk_percent.stdout | int > disk_warning_threshold else 'OK' }}"
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ health_report.status }}"
