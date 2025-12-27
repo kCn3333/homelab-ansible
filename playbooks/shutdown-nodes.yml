@@ -1,0 +1,60 @@
+---
+- name: Gracefully shutdown nodes
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    shutdown_delay: 0
+    stop_docker: true
+  
+  tasks:
+    - name: Check if Docker is installed
+      ansible.builtin.service_facts:
+
+    - name: Stop Docker containers gracefully (if requested)
+      ansible.builtin.shell: |
+        docker stop $(docker ps -q) || true
+      when:
+        - stop_docker | bool
+        - ansible_facts.services['docker.service'] is defined
+      changed_when: true
+      ignore_errors: true
+
+    - name: Stop Docker service (if requested)
+      ansible.builtin.systemd:
+        name: docker
+        state: stopped
+      when:
+        - stop_docker | bool
+        - ansible_facts.services['docker.service'] is defined
+      ignore_errors: true
+
+    - name: Sync filesystem
+      ansible.builtin.command: sync
+      changed_when: false
+
+    - name: Display shutdown warning
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} will shutdown in {{ shutdown_delay }} minute(s)"
+
+    - name: Shutdown the system
+      ansible.builtin.shell: /sbin/shutdown -h +{{ shutdown_delay }} "Shutdown initiated by Ansible"
+      async: 1
+      poll: 0
+      ignore_errors: true
+      changed_when: true
+
+    - name: Wait for system to go down
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: stopped
+        delay: "{{ (shutdown_delay | int * 60) + 10 }}"
+        timeout: "{{ (shutdown_delay | int * 60) + 120 }}"
+      delegate_to: localhost
+      when: shutdown_delay | int >= 0
+
+    - name: Confirm shutdown
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has been shut down"
+      delegate_to: localhost
