@@ -5,6 +5,7 @@
   vars:
     wol_timeout: 120
     wol_delay: 10
+  
   tasks:
     - name: Verify mac_address is defined
       ansible.builtin.assert:
@@ -15,14 +16,25 @@
       delegate_to: localhost
       run_once: false
 
-    - name: Send Wake-on-LAN magic packet
-      ansible.builtin.command: "wakeonlan {{ mac_address }}"
+    - name: Send Wake-on-LAN magic packet (Python)
+      ansible.builtin.shell: |
+        python3 -c "
+        import socket
+        mac = '{{ mac_address }}'.replace(':', '').replace('-', '')
+        data = bytes.fromhex('FF' * 6 + mac * 16)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(data, ('255.255.255.255', 9))
+        sock.close()
+        print('Magic packet sent to {{ mac_address }}')
+        "
       delegate_to: localhost
       changed_when: true
       register: wol_result
+
     - name: Display WoL status
       ansible.builtin.debug:
-        msg: "Magic packet sent to {{ inventory_hostname }} ({{ mac_address }})"
+        msg: "{{ wol_result.stdout }}"
 
     - name: Wait for SSH to become available
       ansible.builtin.wait_for:
@@ -32,6 +44,7 @@
         delay: "{{ wol_delay }}"
         timeout: "{{ wol_timeout }}"
       delegate_to: localhost
+      
     - name: Verify host is reachable
       ansible.builtin.ping:
       retries: 3
