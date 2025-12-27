@@ -7,6 +7,7 @@
     upgrade_type: "safe"  # "safe" or "dist"
     autoremove: true
     reboot_if_required: false
+    ansible_user: kcn
     ansible_become: true
     ansible_become_method: sudo
   tasks:
