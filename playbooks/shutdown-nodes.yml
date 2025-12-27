@@ -52,6 +52,7 @@
         delay: "{{ (shutdown_delay | int * 60) + 10 }}"
         timeout: "{{ (shutdown_delay | int * 60) + 120 }}"
       delegate_to: localhost
+      become: false
       when: shutdown_delay | int >= 0
 
     - name: Confirm shutdown
