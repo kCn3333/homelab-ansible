@@ -1,0 +1,45 @@
+---
+- name: Reboot nodes and wait for them to come back
+  hosts: all
+  gather_facts: true
+  vars:
+    reboot_timeout: 300
+    reboot_delay: 0
+  
+  tasks:
+    - name: Check system uptime before reboot
+      ansible.builtin.command: uptime
+      register: uptime_before
+      changed_when: false
+
+    - name: Display pre-reboot uptime
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} uptime before reboot: {{ uptime_before.stdout }}"
+
+    - name: Reboot the system
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        pre_reboot_delay: "{{ reboot_delay }}"
+        post_reboot_delay: 30
+        msg: "Reboot initiated by Ansible"
+        test_command: uptime
+
+    - name: Wait for system to fully boot
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: "{{ reboot_timeout }}"
+
+    - name: Gather facts after reboot
+      ansible.builtin.setup:
+
+    - name: Verify system is back online
+      ansible.builtin.ping:
+
+    - name: Check system uptime after reboot
+      ansible.builtin.command: uptime
+      register: uptime_after
+      changed_when: false
+
+    - name: Display post-reboot status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is back online. New uptime: {{ uptime_after.stdout }}"
