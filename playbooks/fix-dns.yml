@@ -1,0 +1,99 @@
+---
+- name: Fix DNS configuration on all nodes
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    dns_servers:
+      - 1.1.1.1
+      - 8.8.8.8
+    fallback_dns:
+      - 8.8.4.4
+      - 1.0.0.1
+  
+  tasks:
+    - name: Find netplan configuration files
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: "*.yaml"
+      register: netplan_files
+
+    - name: Backup netplan files
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ item.path }}.backup"
+        remote_src: true
+      loop: "{{ netplan_files.files }}"
+      when: netplan_files.files | length > 0
+
+    - name: Update DNS in netplan (Ubuntu 24.04+ style)
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: '^(\s+)(- 192\.168\.55\.10)$'
+        replace: '\1- 8.8.8.8\n\1- 1.1.1.1'
+      loop: "{{ netplan_files.files }}"
+      when: netplan_files.files | length > 0
+      register: netplan_changed
+
+    - name: Replace gateway4 with routes (deprecated fix)
+      ansible.builtin.shell: |
+        sed -i 's/gateway4:/routes:\n      - to: default\n        via:/' {{ item.path }}
+      loop: "{{ netplan_files.files }}"
+      when: netplan_files.files | length > 0
+      changed_when: false
+      ignore_errors: true
+
+    - name: Apply netplan changes
+      ansible.builtin.command: netplan apply
+      when: netplan_changed is changed
+      async: 30
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait for network to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+      when: netplan_changed is changed
+
+    - name: Configure systemd-resolved as fallback
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^#?DNS='
+        line: 'DNS=8.8.8.8 1.1.1.1'
+        state: present
+      notify: restart_resolved
+
+    - name: Configure fallback DNS in systemd-resolved
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^#?FallbackDNS='
+        line: 'FallbackDNS=8.8.4.4 1.0.0.1'
+        state: present
+      notify: restart_resolved
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for DNS to be ready
+      ansible.builtin.wait_for:
+        timeout: 10
+
+    - name: Test DNS resolution
+      ansible.builtin.command: nslookup archive.ubuntu.com
+      register: dns_test
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 5
+
+    - name: Display DNS test result
+      ansible.builtin.debug:
+        msg: 
+          - "{{ inventory_hostname }}: DNS {{ 'OK ✓' if dns_test.rc == 0 else 'FAILED ✗' }}"
+          - "{{ dns_test.stdout_lines if dns_test.rc == 0 else dns_test.stderr_lines }}"
+
+  handlers:
+    - name: restart_resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
