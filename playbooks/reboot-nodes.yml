@@ -2,6 +2,7 @@
 - name: Reboot nodes and wait for them to come back
   hosts: all
   gather_facts: true
+  become: true
   vars:
     reboot_timeout: 300
     reboot_delay: 0
@@ -17,12 +18,30 @@
         msg: "{{ inventory_hostname }} uptime before reboot: {{ uptime_before.stdout }}"
 
     - name: Reboot the system
-      ansible.builtin.reboot:
-        reboot_timeout: "{{ reboot_timeout }}"
-        pre_reboot_delay: "{{ reboot_delay }}"
-        post_reboot_delay: 30
-        msg: "Reboot initiated by Ansible"
-        test_command: uptime
+      ansible.builtin.shell: sleep {{ reboot_delay }} && /sbin/shutdown -r now "Reboot initiated by Ansible"
+      async: 1
+      poll: 0
+      become: true
+
+    - name: Wait for system to go down
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: stopped
+        delay: 5
+        timeout: 60
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for system to come back
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: started
+        delay: 30
+        timeout: "{{ reboot_timeout }}"
+      delegate_to: localhost
+      become: false
 
     - name: Wait for system to fully boot
       ansible.builtin.wait_for_connection:
