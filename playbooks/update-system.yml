@@ -7,6 +7,8 @@
     upgrade_type: "safe"  # "safe" or "dist"
     autoremove: true
     reboot_if_required: false
+    ansible_become: true
+    ansible_become_method: sudo
   tasks:
     - name: Update apt cache (Debian/Ubuntu)
       ansible.builtin.apt:
