@@ -1,22 +1,24 @@
 ---
-# 🛠️ System preparation - updates, basic packages, configuration
-- name: 🛠️ Prepare Ubuntu/Debian system
+- name: Prepare Ubuntu/Debian system for K3s
   hosts: all
-  become: yes
+  become: true
+  
   tasks:
-    - name: 🔄 Update apt cache
-      apt:
-        update_cache: yes
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
         cache_valid_time: 3600
 
-    - name: ⬆️ Update all packages
-      apt:
+    - name: Update all packages
+      ansible.builtin.apt:
         upgrade: dist
-        autoremove: yes
-        autoclean: yes
+        autoremove: true
+        autoclean: true
+      async: 1800
+      poll: 10
 
-    - name: 📦 Install basic tools
-      apt:
+    - name: Install basic tools
+      ansible.builtin.apt:
         name:
           - curl
           - wget
@@ -25,52 +27,65 @@
           - htop
           - net-tools
           - ca-certificates
+          - open-iscsi
+          - nfs-common
         state: present
 
-    - name: 🔄 Disable swap (required for Kubernetes)
-      shell: swapoff -a
+    - name: Disable swap (required for Kubernetes)
+      ansible.builtin.command: swapoff -a
       when: ansible_swaptotal_mb > 0
+      changed_when: true
 
-    - name: 🗑️ Remove swap from /etc/fstab
-      lineinfile:
+    - name: Remove swap from /etc/fstab
+      ansible.builtin.lineinfile:
         path: /etc/fstab
         regexp: '.*swap.*'
         state: absent
-        backup: yes
+        backup: true
 
-    - name: 🔧 Enable kernel modules for K3s
-      modprobe:
+    - name: Enable kernel modules for K3s
+      community.general.modprobe:
         name: "{{ item }}"
         state: present
       loop:
         - overlay
         - br_netfilter
 
-    - name: 💾 Ensure modules load at boot
-      copy:
+    - name: Ensure modules load at boot
+      ansible.builtin.copy:
         dest: /etc/modules-load.d/k3s.conf
         content: |
           overlay
           br_netfilter
+        mode: '0644'
 
-    - name: ⚙️ Configure sysctl for Kubernetes
-      sysctl:
+    - name: Configure sysctl for Kubernetes
+      ansible.posix.sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
         state: present
-        reload: yes
+        reload: true
+        sysctl_set: true
       loop:
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
         - { name: 'net.ipv4.ip_forward', value: '1' }
 
-    - name: 🏷️ Set hostname based on inventory
-      hostname:
+    - name: Set hostname based on inventory
+      ansible.builtin.hostname:
         name: "{{ inventory_hostname }}"
 
-    - name: 📝 Update /etc/hosts
-      lineinfile:
+    - name: Update /etc/hosts with all cluster nodes
+      ansible.builtin.lineinfile:
         path: /etc/hosts
         line: "{{ hostvars[item].ansible_host }} {{ item }}"
         state: present
       loop: "{{ groups['all'] }}"
+
+    - name: Display preparation summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} prepared for K3s installation"
+          - "Hostname: {{ inventory_hostname }}"
+          - "Swap: Disabled"
+          - "Kernel modules: Loaded"

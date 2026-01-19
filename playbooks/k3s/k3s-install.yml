@@ -1,87 +1,137 @@
 ---
-# ☸️ K3s cluster installation - master first, then workers
-- name: 🎯 Install K3s Master
-  hosts: masters
-  become: yes
+- name: Install K3s Master
+  hosts: master
+  become: true
+  vars:
+    k3s_version: "latest"
+    k3s_server_args: "--write-kubeconfig-mode 644 --disable traefik --disable servicelb"
+  
   tasks:
-    - name: 🔍 Check if K3s is already installed
-      stat:
+    - name: Check if K3s is already installed
+      ansible.builtin.stat:
         path: /usr/local/bin/k3s
       register: k3s_installed
 
-    - name: 📥 Download and install K3s on master
-      shell: |
+    - name: Download and install K3s on master
+      ansible.builtin.shell: |
         curl -sfL https://get.k3s.io | sh -s - server \
-          --write-kubeconfig-mode 644 \
+          {{ k3s_server_args }} \
           --node-name {{ inventory_hostname }}
       when: not k3s_installed.stat.exists
+      changed_when: true
 
-    - name: ⏳ Wait for K3s to start
-      wait_for:
+    - name: Wait for K3s to start
+      ansible.builtin.wait_for:
         port: 6443
         delay: 5
         timeout: 120
 
-    - name: 🔑 Get token from master
-      slurp:
+    - name: Wait for node-token to be created
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 60
+
+    - name: Get token from master
+      ansible.builtin.slurp:
         src: /var/lib/rancher/k3s/server/node-token
       register: k3s_token
 
-    - name: 💾 Save token to fact
-      set_fact:
+    - name: Save token to fact
+      ansible.builtin.set_fact:
         k3s_master_token: "{{ k3s_token.content | b64decode | trim }}"
 
-    - name: 📋 Fetch kubeconfig
-      fetch:
+    - name: Get kubeconfig content
+      ansible.builtin.slurp:
         src: /etc/rancher/k3s/k3s.yaml
-        dest: ./k3s-kubeconfig.yaml
-        flat: yes
+      register: kubeconfig_content
 
-    - name: 📊 Display K3s status
-      command: kubectl get nodes
+    - name: Prepare kubeconfig with master IP
+      ansible.builtin.set_fact:
+        kubeconfig_fixed: "{{ kubeconfig_content.content | b64decode | regex_replace('127.0.0.1', hostvars[groups['master'][0]].ansible_host) }}"
+
+    - name: Display kubeconfig (copy this to use locally)
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          KUBECONFIG - Save this to ~/.kube/config
+          ========================================
+          {{ kubeconfig_fixed }}
+          ========================================
+          
+          Master IP: {{ hostvars[groups['master'][0]].ansible_host }}
+          Server URL: https://{{ hostvars[groups['master'][0]].ansible_host }}:6443
+          ========================================
+
+    - name: Display K3s master status
+      ansible.builtin.command: kubectl get nodes
       register: nodes_output
+      changed_when: false
 
-    - debug:
+    - name: Show master node status
+      ansible.builtin.debug:
         var: nodes_output.stdout_lines
 
-- name: 🔗 Join workers to cluster
-  hosts: workers
-  become: yes
+- name: Join workers to cluster
+  hosts: worker1,worker2
+  become: true
+  
   tasks:
-    - name: 🔍 Check if K3s is already installed
-      stat:
+    - name: Check if K3s is already installed
+      ansible.builtin.stat:
         path: /usr/local/bin/k3s
       register: k3s_installed
 
-    - name: 📥 Install K3s agent on workers
-      shell: |
-        curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars[groups['masters'][0]].ansible_host }}:6443 \
-          K3S_TOKEN={{ hostvars[groups['masters'][0]].k3s_master_token }} \
+    - name: Install K3s agent on workers
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars[groups['master'][0]].ansible_host }}:6443 \
+          K3S_TOKEN={{ hostvars[groups['master'][0]].k3s_master_token }} \
           sh -s - agent --node-name {{ inventory_hostname }}
       when: not k3s_installed.stat.exists
+      changed_when: true
 
-- name: ✅ Verify cluster
-  hosts: masters
-  become: yes
+    - name: Wait for agent to start
+      ansible.builtin.wait_for:
+        timeout: 10
+
+- name: Verify cluster
+  hosts: master
+  become: true
+  
   tasks:
-    - name: ⏳ Wait for workers to join
-      pause:
+    - name: Wait for workers to join
+      ansible.builtin.pause:
         seconds: 15
 
-    - name: 🔍 Check status of all nodes
-      command: kubectl get nodes
+    - name: Check status of all nodes
+      ansible.builtin.command: kubectl get nodes -o wide
       register: final_nodes
+      changed_when: false
 
-    - name: 📊 Display final nodes
-      debug:
+    - name: Display final cluster status
+      ansible.builtin.debug:
         var: final_nodes.stdout_lines
 
-    - name: 📝 Display cluster information
-      debug:
+    - name: Get cluster info
+      ansible.builtin.command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster information
+      ansible.builtin.debug:
         msg: |
+          ========================================
           ✅ K3s cluster installed successfully!
-          📁 Kubeconfig saved at: ./k3s-kubeconfig.yaml
+          ========================================
+          Master: {{ hostvars[groups['master'][0]].ansible_host }}:6443
           
-          🚀 To use kubectl locally:
-          export KUBECONFIG=$(pwd)/k3s-kubeconfig.yaml
-          kubectl get nodes
+          To use kubectl from your workstation:
+          1. Copy the kubeconfig displayed above
+          2. Save it to ~/.kube/config (or any file)
+          3. Use: export KUBECONFIG=~/.kube/config
+          
+          The kubeconfig is already configured with the correct master IP!
+          ========================================
+
+    - name: Display cluster info
+      ansible.builtin.debug:
+        var: cluster_info.stdout_lines
