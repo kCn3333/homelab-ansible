@@ -1,0 +1,76 @@
+---
+# 🛠️ System preparation - updates, basic packages, configuration
+- name: 🛠️ Prepare Ubuntu/Debian system
+  hosts: all
+  become: yes
+  tasks:
+    - name: 🔄 Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: ⬆️ Update all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+
+    - name: 📦 Install basic tools
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - vim
+          - htop
+          - net-tools
+          - ca-certificates
+        state: present
+
+    - name: 🔄 Disable swap (required for Kubernetes)
+      shell: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: 🗑️ Remove swap from /etc/fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '.*swap.*'
+        state: absent
+        backup: yes
+
+    - name: 🔧 Enable kernel modules for K3s
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: 💾 Ensure modules load at boot
+      copy:
+        dest: /etc/modules-load.d/k3s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: ⚙️ Configure sysctl for Kubernetes
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: 🏷️ Set hostname based on inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: 📝 Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item].ansible_host }} {{ item }}"
+        state: present
+      loop: "{{ groups['all'] }}"
