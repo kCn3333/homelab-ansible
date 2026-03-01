@@ -36,6 +36,17 @@
         - '80'
         - '443'
 
+    - name: Allow API and Web from LB host
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.0.46
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '6443'
+        - '80'
+        - '443'
+
     # 4. Cluster internal traffic (pods, services, etc.) - allow from cluster CIDR
     - name: Allow K3s internal traffic
       community.general.ufw:
