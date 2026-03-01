@@ -1,0 +1,78 @@
+---
+- name: Prepare UFW firewall for K3s
+  hosts: all
+  become: true
+  
+  tasks:
+    - name: Install UFW
+      ansible.builtin.apt:
+        name:
+          - ufw
+        state: present
+
+    # 1. default policy - deny all incoming
+    - name: Allow all outgoing traffic
+      community.general.ufw:
+        policy: deny
+        direction: incoming
+
+    # 2. SSH access from local network
+    - name: Allow SSH from local network
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.0.0/24
+        port: '22'
+        proto: tcp
+
+    # 3. Allow API Server and Web traffic from Load Balancer (HaProxy)
+    - name: Allow API and Web from LB
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.0.45
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '6443'
+        - '80'
+        - '443'
+
+    # 4. Cluster internal traffic (pods, services, etc.) - allow from cluster CIDR
+    - name: Allow K3s internal traffic
+      community.general.ufw:
+        rule: allow
+        from_ip: 192.168.55.0/24
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop:
+        - { port: '6443', proto: 'tcp' }   # API Server
+        - { port: '8472', proto: 'udp' }   # Flannel VXLAN
+        - { port: '51820', proto: 'udp' }  # Wireguard (opcjonalnie)
+        - { port: '10250', proto: 'tcp' }  # Kubelet
+        - { port: '2379', proto: 'tcp' }   # etcd client
+        - { port: '2380', proto: 'tcp' }   # etcd peer
+
+    - name: Allow pod network traffic
+      community.general.ufw:
+        rule: allow
+        from_ip: 10.42.0.0/16
+
+    # Some additional security rules
+    - name: Set logging
+      community.general.ufw:
+        logging: 'on'
+
+    - name: Rejected connection
+      community.general.ufw:
+        rule: reject
+        port: auth
+        log: true
+
+    - name: Limit SSH connections (global safety)
+      community.general.ufw:
+        rule: limit
+        port: ssh
+        proto: tcp
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
