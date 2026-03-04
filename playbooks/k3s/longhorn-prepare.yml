@@ -1,0 +1,47 @@
+- name: Prepare Ubuntu/Debian system for Longhorn
+  hosts: all
+  become: true
+  
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Update all packages
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+      async: 1800
+      poll: 10
+
+    - name: Install dependencies for Longhorn
+      ansible.builtin.apt:
+        name:
+          - open-iscsi
+          - nfs-common
+          - util-linux
+          - grep
+          - sed
+          - curl
+        state: present
+
+    - name: Ensure iscsid is enabled and running
+      ansible.builtin.systemd:
+        name: iscsid
+        enabled: true
+        state: started
+
+    - name: Check if multipathd is running
+      ansible.builtin.systemd:
+        name: multipathd
+        state: started
+        enabled: true
+      ignore_errors: true
+      register: multipath_check
+
+    - name: Inform about multipathd status
+      ansible.builtin.debug:
+        msg: "Multipathd is not present or failed to start, which is usually fine for basic Longhorn setups."
+      when: multipath_check.failed
