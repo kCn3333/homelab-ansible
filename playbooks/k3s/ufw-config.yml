@@ -57,10 +57,11 @@
       loop:
         - { port: '6443', proto: 'tcp' }   # API Server
         - { port: '8472', proto: 'udp' }   # Flannel VXLAN
-        - { port: '51820', proto: 'udp' }  # Wireguard (opcjonalnie)
+        - { port: '51820', proto: 'udp' }  # Wireguard
         - { port: '10250', proto: 'tcp' }  # Kubelet
         - { port: '2379', proto: 'tcp' }   # etcd client
         - { port: '2380', proto: 'tcp' }   # etcd peer
+        - { port: '9100', proto: 'tcp' }   # for prometheus node exporter
 
     - name: Allow pod network traffic
       community.general.ufw:
