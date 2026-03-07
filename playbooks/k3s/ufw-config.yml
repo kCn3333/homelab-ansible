@@ -65,7 +65,7 @@
     - name: Allow pod network traffic
       community.general.ufw:
         rule: allow
-        from_ip: 10.42.0.0/16
+        from_ip: 10.0.0.0/16
 
     # Some additional security rules
     - name: Set logging
