@@ -55,6 +55,7 @@
         port: "{{ item.port }}"
         proto: "{{ item.proto }}"
       loop:
+        - { port: '123', proto: 'udp' }    # NTP
         - { port: '6443', proto: 'tcp' }   # API Server
         - { port: '8472', proto: 'udp' }   # Flannel VXLAN
         - { port: '51820', proto: 'udp' }  # Wireguard
