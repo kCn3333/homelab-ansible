@@ -1,0 +1,29 @@
+- name: Sync time across cluster
+  hosts: workers  
+  become: true
+  tasks:
+    - name: Configure timesyncd
+      ansible.builtin.copy:
+        dest: /etc/systemd/timesyncd.conf
+        content: |
+          [Time]
+          NTP=192.168.55.10
+          FallbackNTP=ntp.ubuntu.com
+          RootDistanceMaxSec=5
+          PollIntervalMinSec=32
+          PollIntervalMaxSec=2048
+
+    - name: Enable and restart timesyncd
+      ansible.builtin.systemd:
+        name: systemd-timesyncd
+        state: restarted
+        enabled: true
+
+    - name: Wait for sync
+      ansible.builtin.shell: |
+        for i in $(seq 1 10); do
+          timedatectl status | grep -q "synchronized: yes" && exit 0
+          sleep 3
+        done
+        exit 1
+      changed_when: false
