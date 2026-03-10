@@ -63,6 +63,7 @@
         - { port: '2379', proto: 'tcp' }   # etcd client
         - { port: '2380', proto: 'tcp' }   # etcd peer
         - { port: '9100', proto: 'tcp' }   # for prometheus node exporter
+        - { port: '4443', proto: 'tcp' }   # for metrics-server
 
     - name: Allow pod network traffic
       community.general.ufw:
