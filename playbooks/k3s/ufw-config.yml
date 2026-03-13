@@ -64,6 +64,7 @@
         - { port: '2380', proto: 'tcp' }   # etcd peer
         - { port: '9100', proto: 'tcp' }   # for prometheus node exporter
         - { port: '4443', proto: 'tcp' }   # for metrics-server
+        - { port: '4244', proto: 'tcp' }   # for Hubble relay between cluster nodes
 
     - name: Allow pod network traffic
       community.general.ufw:
