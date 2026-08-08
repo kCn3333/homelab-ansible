@@ -1,0 +1,59 @@
+# Ansible
+*.retry
+*.log
+.vault_pass
+.vault_pass.*
+.ansible/
+
+# Inventory is private static-yaml managed in Semaphore.
+cluster/inventory/
+homelab/inventory/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+id_rsa
+id_rsa_*
+id_ed25519
+id_ed25519_*
+id_ecdsa
+id_ecdsa_*
+
+*_rsa
+*_rsa.pub
+secrets.yml
+vault.yml
+**/secrets.yml
+**/vault.yml
+
+# Temporary files
+tmp/
+temp/
+*.tmp

@@ -1,0 +1,49 @@
+---
+- name: Collect homelab preflight information
+  hosts: homelab_managed
+  gather_facts: true
+  tasks:
+    - name: Check whether a restart is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Count available APT updates
+      ansible.builtin.command:
+        cmd: apt list --upgradable
+      register: available_updates
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check whether Docker is present
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_present
+      changed_when: false
+      failed_when: false
+
+    - name: Report preflight information
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          operating_system: >-
+            {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+          kernel: "{{ ansible_facts.kernel }}"
+          root_space_available_bytes: >-
+            {{ (ansible_facts.mounts
+                | selectattr('mount', 'equalto', '/')
+                | map(attribute='size_available')
+                | first) | default('unknown') }}
+          memory_total_mb: "{{ ansible_facts.memtotal_mb }}"
+          memory_free_mb: "{{ ansible_facts.memfree_mb }}"
+          reboot_required: "{{ reboot_required.stat.exists }}"
+          available_updates: >-
+            {{ (available_updates.stdout_lines
+                | default([])
+                | reject('match', '^Listing'))
+                | list
+                | length
+               if ansible_facts.os_family == 'Debian'
+               else 'not checked for this OS' }}
+          docker_present: "{{ docker_present.rc == 0 }}"

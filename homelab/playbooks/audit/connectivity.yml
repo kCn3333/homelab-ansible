@@ -1,0 +1,13 @@
+---
+- name: Audit homelab connectivity
+  hosts: homelab_managed
+  gather_facts: false
+  tasks:
+    - name: Check Ansible connectivity
+      ansible.builtin.ping:
+
+    - name: Report reachable host
+      ansible.builtin.debug:
+        msg: >-
+          Connected to {{ inventory_hostname }} at {{ ansible_host }} on SSH
+          port {{ ansible_port | default('selected by the SSH transport') }}.
