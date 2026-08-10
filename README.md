@@ -23,14 +23,24 @@ in Semaphore Key Store or in a separately designed Ansible Vault workflow.
 
 ## Included playbooks
 
-The repository currently provides only non-mutating audits:
+The repository provides non-mutating audits and explicitly gated APT
+maintenance:
 
 - cluster connectivity;
 - homelab connectivity;
-- homelab system preflight information.
+- homelab system preflight information;
+- a read-only preview of safe APT updates;
+- serial installation of safe APT updates for hosts explicitly assigned to
+  `update_standard`.
 
-No package update, restart, shutdown, firewall, SSH configuration, cluster
-installation, or cleanup automation is included.
+Run the APT preview before the upgrade playbook. The `update_standard` group is
+an explicit safety gate: update playbooks never target `all` or the broader
+`homelab_managed` group. Updates run one host at a time. Automatic reboot and
+package autoremove are disabled, although package installation scripts may
+still restart the particular services managed by those packages.
+
+No shutdown, firewall, SSH configuration, cluster installation, or cleanup
+automation is included.
 
 ## Local development
 

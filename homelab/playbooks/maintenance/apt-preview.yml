@@ -1,0 +1,51 @@
+---
+- name: Preview safe APT updates
+  hosts: update_standard
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Require a Debian-family system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+        fail_msg: APT maintenance is supported only on Debian-family systems.
+
+    - name: Simulate safe APT upgrade
+      ansible.builtin.command:
+        cmd: apt-get --simulate --no-remove upgrade
+      register: apt_preview
+      changed_when: false
+      failed_when: false
+
+    - name: Read held packages
+      ansible.builtin.command:
+        cmd: apt-mark showhold
+      register: apt_held_packages
+      changed_when: false
+
+    - name: Check whether a reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: apt_preview_reboot_required
+
+    - name: Report APT update preview
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          planned_installations_or_updates: >-
+            {{ apt_preview.stdout_lines | default([]) | select('match', '^Inst ') | list | length }}
+          planned_removals: >-
+            {{ apt_preview.stdout_lines | default([]) | select('match', '^Remv ') | list | length }}
+          held_packages: "{{ apt_held_packages.stdout_lines | default([]) }}"
+          reboot_required: >-
+            {{ apt_preview_reboot_required.stat.exists | default(false) }}
+          planned_changes: >-
+            {{ apt_preview.stdout_lines | default([]) | select('match', '^(Inst|Remv) ') | list }}
+
+    - name: Require a successful simulation without removals
+      ansible.builtin.assert:
+        that:
+          - apt_preview.rc == 0
+          - apt_preview.stdout_lines | default([]) | select('match', '^Remv ') | list | length == 0
+        fail_msg: APT simulation failed or planned package removal.
