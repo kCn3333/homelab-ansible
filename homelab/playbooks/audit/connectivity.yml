@@ -8,6 +8,4 @@
 
     - name: Report reachable host
       ansible.builtin.debug:
-        msg: >-
-          Connected to {{ inventory_hostname }} at {{ ansible_host }} on SSH
-          port {{ ansible_port | default('selected by the SSH transport') }}.
+        msg: "Connected to {{ inventory_hostname }}."

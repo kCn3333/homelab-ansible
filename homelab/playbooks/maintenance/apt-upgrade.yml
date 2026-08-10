@@ -1,0 +1,74 @@
+---
+- name: Install safe APT updates
+  hosts: update_standard
+  gather_facts: true
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    homelab_apt_cache_valid_time: 3600
+    homelab_apt_lock_timeout: 300
+  tasks:
+    - name: Require a Debian-family system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+        fail_msg: APT maintenance is supported only on Debian-family systems.
+
+    - name: Refresh APT cache when stale
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ homelab_apt_cache_valid_time }}"
+        lock_timeout: "{{ homelab_apt_lock_timeout }}"
+      register: apt_cache_update
+
+    - name: Simulate safe APT upgrade
+      ansible.builtin.command:
+        cmd: apt-get --simulate --no-remove upgrade
+      register: apt_upgrade_preview
+      changed_when: false
+      failed_when: false
+
+    - name: Require a successful simulation without removals
+      ansible.builtin.assert:
+        that:
+          - apt_upgrade_preview.rc == 0
+          - apt_upgrade_preview.stdout_lines | default([]) | select('match', '^Remv ') | list | length == 0
+        fail_msg: APT simulation failed or planned package removal; upgrade stopped.
+
+    - name: Install safe APT updates
+      ansible.builtin.apt:
+        upgrade: safe
+        force_apt_get: true
+        fail_on_autoremove: true
+        autoremove: false
+        autoclean: false
+        clean: false
+        allow_unauthenticated: false
+        allow_downgrade: false
+        allow_change_held_packages: false
+        lock_timeout: "{{ homelab_apt_lock_timeout }}"
+        dpkg_options: "force-confdef,force-confold"
+      register: apt_upgrade_result
+
+    - name: Check whether a reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: apt_upgrade_reboot_required
+
+    - name: Simulate remaining safe APT updates
+      ansible.builtin.command:
+        cmd: apt-get --simulate --no-remove upgrade
+      register: apt_remaining_preview
+      changed_when: false
+
+    - name: Report APT update result
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          cache_refreshed: "{{ apt_cache_update.changed | default(false) }}"
+          upgrade_performed: "{{ apt_upgrade_result.changed | default(false) }}"
+          remaining_candidates: >-
+            {{ apt_remaining_preview.stdout_lines | default([]) | select('match', '^Inst ') | list | length }}
+          reboot_required: >-
+            {{ apt_upgrade_reboot_required.stat.exists | default(false) }}
