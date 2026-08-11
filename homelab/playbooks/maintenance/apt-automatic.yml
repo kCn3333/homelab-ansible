@@ -5,8 +5,6 @@
   gather_facts: true
   serial: 1
   order: inventory
-  any_errors_fatal: true
-  max_fail_percentage: 0
   tasks:
     - name: Run guarded automatic maintenance
       block:
@@ -62,22 +60,53 @@
             clean: true
             lock_timeout: 300
 
+        - name: Reload systemd manager configuration
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
         - name: Check whether a reboot is required
           ansible.builtin.stat:
             path: /var/run/reboot-required
           register: automatic_reboot_required
 
-        - name: Read failed systemd units
+        - name: Read failed systemd units before orphan cleanup
           ansible.builtin.command:
-            cmd: systemctl --failed --no-legend --plain
-          register: automatic_failed_units
+            cmd: systemctl --failed --no-legend --plain --no-pager
+          register: automatic_failed_units_before_cleanup
           changed_when: false
           failed_when: false
 
-        - name: Require no failed systemd units
+        - name: Select orphaned failed systemd units
+          ansible.builtin.set_fact:
+            automatic_orphaned_failed_units: >-
+              {{ automatic_failed_units_before_cleanup.stdout_lines
+                 | default([])
+                 | select('match', '^\\S+\\s+not-found\\s+failed\\s+failed(?:\\s|$)')
+                 | map('regex_replace', '^(\\S+).*', '\\1')
+                 | list }}
+
+        - name: Reset each orphaned failed systemd unit
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - reset-failed
+              - "{{ item }}"
+          loop: "{{ automatic_orphaned_failed_units | default([]) }}"
+          loop_control:
+            label: orphaned failed unit
+
+        - name: Read failed systemd units after orphan cleanup
+          ansible.builtin.command:
+            cmd: systemctl --failed --no-legend --plain --no-pager
+          register: automatic_failed_units_after_cleanup
+          changed_when: false
+          failed_when: false
+
+        - name: Require a successful systemd check with no failed units
           ansible.builtin.assert:
             that:
-              - automatic_failed_units.stdout_lines | default([]) | length == 0
+              - automatic_failed_units_after_cleanup.rc | default(1) == 0
+              - automatic_failed_units_after_cleanup.stdout_lines | default([]) | length == 0
             fail_msg: Automatic maintenance detected failed systemd units.
 
         - name: Notify that a reboot is required
@@ -109,7 +138,10 @@
               reboot_required: >-
                 {{ automatic_reboot_required.stat.exists | default(false) }}
               failed_systemd_units: >-
-                {{ automatic_failed_units.stdout_lines | default([]) | length }}
+                {{ automatic_failed_units_after_cleanup.stdout_lines
+                   | default([]) | length }}
+              orphaned_failed_units_reset: >-
+                {{ automatic_orphaned_failed_units | default([]) | length }}
 
       rescue:
         - name: Attempt automatic maintenance failure notification

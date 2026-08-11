@@ -49,7 +49,9 @@ into the separate cluster project.
 - `playbooks/maintenance/apt-automatic.yml`: processes one explicitly selected
   `update_automatic` host at a time, performs an APT distribution upgrade,
   removes obsolete packages with purge, runs autoclean and clean, and fails if
-  any systemd units remain failed.
+  any systemd units remain failed. After reloading systemd, it clears only
+  orphaned failed entries whose unit files are no longer present, then checks
+  all failed units again.
 
 Run `apt-preview.yml` first and review its result before running
 `apt-upgrade.yml`. Both playbooks process one `update_standard` host at a time.
@@ -63,7 +65,9 @@ maintenance fails, it sends a notification through the URL and bearer token in
 provided only as secret environment variables in Semaphore and must never be
 stored in this repository. A completely successful run that does not require a
 reboot sends no notification. Package installation scripts may still restart
-their own services during a distribution upgrade.
+their own services during a distribution upgrade. A host failure triggers that
+host's notification and failure result without preventing the next
+`update_automatic` host from being processed.
 
 Real inventory, host data, connection settings, and credentials remain only in
 Semaphore. Do not add an inventory file to this repository. Reboots,
