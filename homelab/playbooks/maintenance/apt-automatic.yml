@@ -81,8 +81,8 @@
             automatic_orphaned_failed_units: >-
               {{ automatic_failed_units_before_cleanup.stdout_lines
                  | default([])
-                 | select('match', '^\\S+\\s+not-found\\s+failed\\s+failed(?:\\s|$)')
-                 | map('regex_replace', '^(\\S+).*', '\\1')
+                 | select('match', '^\s*\S+\s+not-found\s+failed\s+failed(?:\s|$)')
+                 | map('regex_replace', '^\s*(\S+).*', '\1')
                  | list }}
 
         - name: Reset each orphaned failed systemd unit
