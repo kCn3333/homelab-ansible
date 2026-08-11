@@ -31,13 +31,23 @@ maintenance:
 - homelab system preflight information;
 - a read-only preview of safe APT updates;
 - serial installation of safe APT updates for hosts explicitly assigned to
-  `update_standard`.
+  `update_standard`;
+- serial automatic APT maintenance for hosts explicitly assigned to
+  `update_automatic`;
+- a local test for maintenance notifications.
 
 Run the APT preview before the upgrade playbook. The `update_standard` group is
 an explicit safety gate: update playbooks never target `all` or the broader
 `homelab_managed` group. Updates run one host at a time. Automatic reboot and
 package autoremove are disabled, although package installation scripts may
 still restart the particular services managed by those packages.
+
+Automatic maintenance is a separate, explicit policy for the
+`update_automatic` group. It performs a distribution upgrade followed by
+autoremove with purge, autoclean, and clean, but never reboots a host
+automatically. Maintenance notifications use `MAINTENANCE_NTFY_URL` and
+`MAINTENANCE_NTFY_TOKEN`, supplied only as secret environment variables in
+Semaphore. The repository contains neither notification endpoints nor tokens.
 
 No shutdown, firewall, SSH configuration, cluster installation, or cleanup
 automation is included.
