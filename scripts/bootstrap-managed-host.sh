@@ -13,6 +13,8 @@ rollback_needed=false
 managed_paths_touched=false
 authorized_keys_existed=false
 sudoers_existed=false
+authorized_keys_touched=false
+sudoers_touched=false
 key_pending=""
 sudo_pending=""
 home_meta=""
@@ -24,15 +26,19 @@ die() { echo "Error: $1" >&2; exit "${2:-2}"; }
 cleanup() {
   rc=$?
   if ((rc != 0)) && [[ "$rollback_needed" == true && "$managed_paths_touched" == true ]]; then
-    if [[ "$authorized_keys_existed" == true ]]; then
-      cp -p -- "$tmp_dir/authorized_keys.before" /home/ansible/.ssh/authorized_keys
-    else
-      rm -f -- /home/ansible/.ssh/authorized_keys
+    if [[ "$authorized_keys_touched" == true ]]; then
+      if [[ "$authorized_keys_existed" == true ]]; then
+        cp -p -- "$tmp_dir/authorized_keys.before" /home/ansible/.ssh/authorized_keys
+      else
+        rm -f -- /home/ansible/.ssh/authorized_keys
+      fi
     fi
-    if [[ "$sudoers_existed" == true ]]; then
-      cp -p -- "$tmp_dir/sudoers.before" /etc/sudoers.d/90-semaphore-ansible
-    elif [[ "$allow_sudo" == true ]]; then
-      rm -f -- /etc/sudoers.d/90-semaphore-ansible
+    if [[ "$sudoers_touched" == true ]]; then
+      if [[ "$sudoers_existed" == true ]]; then
+        cp -p -- "$tmp_dir/sudoers.before" /etc/sudoers.d/90-semaphore-ansible
+      else
+        rm -f -- /etc/sudoers.d/90-semaphore-ansible
+      fi
     fi
     if [[ -n "$ssh_meta" ]]; then
       IFS=: read -r ssh_uid ssh_gid ssh_mode <<< "$ssh_meta"
@@ -174,6 +180,7 @@ if [[ "$authorized_keys_correct" != true ]]; then
   chown ansible:ansible "$key_pending"
   chmod 0600 "$key_pending"
   ssh-keygen -lf "$key_pending" >/dev/null 2>&1 || die "authorized_keys validation failed" 8
+  authorized_keys_touched=true
   mv -f -- "$key_pending" /home/ansible/.ssh/authorized_keys
   key_pending=""
 fi
@@ -194,6 +201,7 @@ if [[ "$allow_sudo" == true ]]; then
     printf '%s\n' 'ansible ALL=(ALL:ALL) NOPASSWD: ALL' >| "$sudo_pending"
     chmod 0440 "$sudo_pending"; chown root:root "$sudo_pending"
     visudo -cf "$sudo_pending" >/dev/null || die "pending sudoers validation failed" 9
+    sudoers_touched=true
     mv -f -- "$sudo_pending" "$sudoers"
     sudo_pending=""
   fi
