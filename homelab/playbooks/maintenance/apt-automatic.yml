@@ -117,10 +117,12 @@
             headers:
               Authorization: >-
                 Bearer {{ lookup('ansible.builtin.env', 'MAINTENANCE_NTFY_TOKEN', default='') }}
-              Title: Automatic maintenance requires a reboot
+              Title: "Reboot required: {{ inventory_hostname }}"
               Priority: default
               Tags: warning
-            body: Automatic maintenance completed and requires a reboot.
+            body: >-
+              Automatic maintenance completed on {{ inventory_hostname }} and the host
+              requires a reboot.
             status_code: 200
           delegate_to: localhost
           become: false
@@ -152,10 +154,10 @@
             headers:
               Authorization: >-
                 Bearer {{ lookup('ansible.builtin.env', 'MAINTENANCE_NTFY_TOKEN', default='') }}
-              Title: Automatic maintenance failed
+              Title: "Maintenance failed: {{ inventory_hostname }}"
               Priority: high
               Tags: rotating_light
-            body: Automatic APT maintenance failed.
+            body: "Automatic APT maintenance failed on {{ inventory_hostname }}."
             status_code: 200
           delegate_to: localhost
           become: false

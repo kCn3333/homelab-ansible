@@ -34,6 +34,8 @@ maintenance:
   `update_standard`;
 - serial automatic APT maintenance for hosts explicitly assigned to
   `update_automatic`;
+- a separately approved reboot workflow for exactly one host explicitly
+  selected from `reboot_approved`;
 - a local test for maintenance notifications.
 
 Run the APT preview before the upgrade playbook. The `update_standard` group is
@@ -49,8 +51,12 @@ automatically. Maintenance notifications use `MAINTENANCE_NTFY_URL` and
 `MAINTENANCE_NTFY_TOKEN`, supplied only as secret environment variables in
 Semaphore. The repository contains neither notification endpoints nor tokens.
 
-No shutdown, firewall, SSH configuration, cluster installation, or cleanup
-automation is included.
+The reboot workflow is never scheduled automatically. It requires a one-host
+limit, a matching explicit target variable, a pending reboot marker, and a
+clean systemd state before restarting the selected host.
+
+No general shutdown, firewall, SSH configuration, cluster installation, or
+unrelated cleanup automation is included.
 
 ## Optional host onboarding tools
 

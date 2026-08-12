@@ -13,6 +13,8 @@ The private Semaphore `static-yaml` inventory may use these abstract groups:
   APT maintenance policy;
 - `update_automatic`: explicit safety gate for systems eligible for automatic
   distribution upgrades and cleanup;
+- `reboot_approved`: temporary, explicit safety gate for a single host whose
+  pending reboot has been manually approved;
 - `controllers`: appliance-like service controllers;
 - `edge`: DNS, proxy, load-balancer, or public-facing systems;
 - `infrastructure`: supporting compute, backup, and monitoring systems;
@@ -52,6 +54,9 @@ into the separate cluster project.
   any systemd units remain failed. After reloading systemd, it clears only
   orphaned failed entries whose unit files are no longer present, then checks
   all failed units again.
+- `playbooks/maintenance/reboot-required.yml`: reboots exactly one manually
+  approved host from `reboot_approved`, then validates the reboot-required
+  marker and failed systemd units after SSH connectivity returns.
 
 Run `apt-preview.yml` first and review its result before running
 `apt-upgrade.yml`. Both playbooks process one `update_standard` host at a time.
@@ -69,9 +74,31 @@ their own services during a distribution upgrade. A host failure triggers that
 host's notification and failure result without preventing the next
 `update_automatic` host from being processed.
 
+Reboots are deliberately separate from automatic APT maintenance. The
+automatic workflow only sends a notification when a reboot is required. The
+reboot playbook has no schedule and targets only the private Semaphore group
+`reboot_approved`. An operator must limit execution to exactly one host and
+provide an identical `reboot_target`; both conditions are checked before any
+change. The host must have `/var/run/reboot-required`, and any failed systemd
+unit blocks the reboot pending separate diagnosis. After the host returns over
+SSH, the playbook requires the reboot marker to be absent and systemd to report
+no failed units.
+
+For an abstract host selected from private inventory, an invocation is:
+
+```text
+ansible-playbook homelab/playbooks/maintenance/reboot-required.yml --limit host1 -e reboot_target=host1
+```
+
+Do not initially place a relay host in `reboot_approved`: its return path may
+depend on WireGuard and require the cloud operator console if connectivity does
+not recover. Proxmox, PBS, and other infrastructure hosts also require a
+separate approval decision before group membership. The group and all real host
+identities exist only in private Semaphore inventory.
+
 Real inventory, host data, connection settings, and credentials remain only in
-Semaphore. Do not add an inventory file to this repository. Reboots,
-shutdowns, security policy, SSH changes, and cleanup are not included.
+Semaphore. Do not add an inventory file to this repository. General shutdown,
+security policy, SSH changes, and unrelated cleanup are not included.
 
 ## Optional onboarding
 
