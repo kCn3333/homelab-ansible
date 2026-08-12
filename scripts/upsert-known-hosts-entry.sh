@@ -31,7 +31,15 @@ while (($#)); do
 done
 [[ -n "$host" && -n "$entry_file" && -n "$known_hosts" ]] || { usage >&2; exit 2; }
 [[ "$host" != *[[:space:],\[\]\|]* && "$host" != \|* ]] || die "invalid host"
-[[ "$port" =~ ^[0-9]+$ && ${#port} -le 5 ]] && ((10#$port >= 1 && 10#$port <= 65535)) || die "invalid port"
+if [[ ! "$port" =~ ^[0-9]+$ || ${#port} -gt 5 ]]; then
+  die "invalid port"
+fi
+
+port_number=$((10#$port))
+
+if ((port_number < 1 || port_number > 65535)); then
+  die "invalid port"
+fi
 [[ -f "$entry_file" && ! -L "$entry_file" ]] || die "entry file must be a regular file"
 ssh-keygen -lf "$entry_file" >/dev/null 2>&1 || die "invalid entry file"
 lookup=$host
