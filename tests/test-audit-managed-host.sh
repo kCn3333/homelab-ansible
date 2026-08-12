@@ -22,7 +22,10 @@ if ! PATH="$tmp/bin:/usr/bin:/bin" bash -o noclobber scripts/audit-managed-host.
 fi
 rg -q '^apt_simulation_rc=0$' "$tmp/report"
 rg -q '^apt_planned_installations_or_updates=1$' "$tmp/report"
-! rg -q 'repository|Inst example-package' "$tmp/report"
+if rg -q 'repository|Inst example-package' "$tmp/report"; then
+  echo "audit report exposed package details" >&2
+  exit 1
+fi
 PATH="$tmp/bin:/usr/bin:/bin" bash -o noclobber scripts/audit-managed-host.sh --show-packages > "$tmp/packages"
 rg -q '^apt_planned_packages=example-package$' "$tmp/packages"
 cat >| "$tmp/bin/apt-get" <<'EOF'
@@ -37,5 +40,8 @@ failure_rc=$?
 set -e
 [[ $failure_rc -eq 1 ]]
 rg -q '^apt_simulation_rc=42$' "$tmp/failure-report"
-! rg -q 'simulation failed' "$tmp/failure-report"
+if rg -q 'simulation failed' "$tmp/failure-report"; then
+  echo "audit report exposed APT error output" >&2
+  exit 1
+fi
 echo "audit-managed-host tests passed"

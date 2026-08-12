@@ -71,6 +71,7 @@ docker run --rm \
     getent passwd ansible >/dev/null
     test "$(sha256sum /home/ansible/.ssh/authorized_keys)" = "$key_before"
     test "$(stat -c "%u:%g:%a:%Y" /home/ansible/.ssh/authorized_keys)" = "$key_meta_before"
+    test -f /etc/sudoers.d/90-semaphore-ansible
     test "$(sha256sum /etc/sudoers.d/90-semaphore-ansible)" = "$sudo_before"
     test "$(stat -c "%u:%g:%a:%Y" /etc/sudoers.d/90-semaphore-ansible)" = "$sudo_meta_before"
   '

@@ -31,7 +31,15 @@ done
 
 [[ -n "$host" && -n "$key_file" && -n "$output" ]] || { usage >&2; exit 2; }
 [[ "$host" != *[[:space:],\[\]\|]* && "$host" != \|* ]] || die "invalid host"
-[[ "$port" =~ ^[0-9]+$ && ${#port} -le 5 ]] && ((10#$port >= 1 && 10#$port <= 65535)) || die "invalid port"
+if [[ ! "$port" =~ ^[0-9]+$ || ${#port} -gt 5 ]]; then
+  die "invalid port"
+fi
+
+port_number=$((10#$port))
+
+if ((port_number < 1 || port_number > 65535)); then
+  die "invalid port"
+fi
 [[ -f "$key_file" && ! -L "$key_file" ]] || die "host key file must be a regular file"
 [[ ! -e "$output" || "$force" == true ]] || die "output already exists" 3
 
