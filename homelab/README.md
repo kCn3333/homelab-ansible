@@ -72,3 +72,11 @@ host's notification and failure result without preventing the next
 Real inventory, host data, connection settings, and credentials remain only in
 Semaphore. Do not add an inventory file to this repository. Reboots,
 shutdowns, security policy, SSH changes, and cleanup are not included.
+
+## Optional onboarding
+
+Optional public scripts can audit and prepare a new Debian-family host and
+manage a verified known-hosts entry without discovering host keys over the
+network. The process remains deliberately two-channel: inventory and secrets
+stay private in Semaphore, and host identity is verified through a trusted
+console. Follow [`docs/host-onboarding.md`](../docs/host-onboarding.md).

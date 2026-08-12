@@ -52,6 +52,15 @@ Semaphore. The repository contains neither notification endpoints nor tokens.
 No shutdown, firewall, SSH configuration, cluster installation, or cleanup
 automation is included.
 
+## Optional host onboarding tools
+
+The scripts in [`scripts/`](scripts/) provide optional, review-first host
+auditing, bootstrap, and known-hosts file maintenance. Onboarding remains a
+two-channel process: generic automation is public, while real inventory,
+connection details, and secrets stay outside this repository in Semaphore or
+on the administrator workstation. See
+[`docs/host-onboarding.md`](docs/host-onboarding.md) for the complete procedure.
+
 ## Local development
 
 Syntax validation requires a temporary inventory containing fictional hosts and
