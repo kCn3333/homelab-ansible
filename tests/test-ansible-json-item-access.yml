@@ -1,0 +1,23 @@
+---
+- name: Verify unambiguous Kubernetes JSON item access
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    kubernetes_response: >-
+      {"apiVersion": "v1", "items": [{"metadata": {"name": "example"}}]}
+  tasks:
+    - name: Parse and serialize the Kubernetes items field
+      ansible.builtin.set_fact:
+        parsed_items: "{{ (kubernetes_response | from_json)['items'] }}"
+        serialized_items: "{{ (kubernetes_response | from_json)['items'] | to_json }}"
+
+    - name: Require list semantics and JSON serialization
+      ansible.builtin.assert:
+        that:
+          - parsed_items | type_debug == 'list'
+          - serialized_items | type_debug == 'str'
+          - serialized_items | from_json | type_debug == 'list'
+          - parsed_items[0]['metadata']['name'] == 'example'
+          - (serialized_items | from_json)[0]['metadata']['name'] == 'example'

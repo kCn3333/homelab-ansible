@@ -108,7 +108,7 @@
 
     - name: Parse live Node names
       ansible.builtin.set_fact:
-        k3s_live_node_names: "{{ (k3s_preflight_nodes_raw.stdout | from_json).items | map(attribute='metadata.name') | list }}"
+        k3s_live_node_names: "{{ (k3s_preflight_nodes_raw.stdout | from_json)['items'] | map(attribute='metadata.name') | list }}"
 
     - name: Require exact Node membership
       ansible.builtin.assert:
@@ -181,10 +181,10 @@
 
     - name: Parse expected Longhorn resources
       ansible.builtin.set_fact:
-        k3s_preflight_backup_targets: "{{ (k3s_preflight_longhorn_raw.results[0].stdout | from_json).items }}"
-        k3s_preflight_volumes: "{{ (k3s_preflight_longhorn_raw.results[1].stdout | from_json).items }}"
-        k3s_preflight_backups: "{{ (k3s_preflight_longhorn_raw.results[2].stdout | from_json).items }}"
-        k3s_preflight_engines: "{{ (k3s_preflight_longhorn_raw.results[3].stdout | from_json).items }}"
+        k3s_preflight_backup_targets: "{{ (k3s_preflight_longhorn_raw.results[0].stdout | from_json)['items'] }}"
+        k3s_preflight_volumes: "{{ (k3s_preflight_longhorn_raw.results[1].stdout | from_json)['items'] }}"
+        k3s_preflight_backups: "{{ (k3s_preflight_longhorn_raw.results[2].stdout | from_json)['items'] }}"
+        k3s_preflight_engines: "{{ (k3s_preflight_longhorn_raw.results[3].stdout | from_json)['items'] }}"
       when: k3s_health_expect_longhorn | bool
 
     - name: Read expected CloudNativePG clusters
@@ -201,14 +201,14 @@
           {% set result = {'expect': {'flux': k3s_health_expect_flux | bool,
                                       'longhorn': k3s_health_expect_longhorn | bool,
                                       'cnpg': k3s_health_expect_cnpg | bool}} %}
-          {% set _ = result.update({'flux_git_repositories': (k3s_preflight_flux_raw.results[0].stdout | from_json).items,
-                                    'flux_kustomizations': (k3s_preflight_flux_raw.results[1].stdout | from_json).items,
-                                    'flux_helm_releases': (k3s_preflight_flux_raw.results[2].stdout | from_json).items}) if k3s_health_expect_flux | bool else none %}
+          {% set _ = result.update({'flux_git_repositories': (k3s_preflight_flux_raw.results[0].stdout | from_json)['items'],
+                                    'flux_kustomizations': (k3s_preflight_flux_raw.results[1].stdout | from_json)['items'],
+                                    'flux_helm_releases': (k3s_preflight_flux_raw.results[2].stdout | from_json)['items']}) if k3s_health_expect_flux | bool else none %}
           {% set _ = result.update({'longhorn_backup_targets': k3s_preflight_backup_targets,
                                     'longhorn_volumes': k3s_preflight_volumes,
                                     'longhorn_backups': k3s_preflight_backups,
                                     'longhorn_engines': k3s_preflight_engines}) if k3s_health_expect_longhorn | bool else none %}
-          {% set _ = result.update({'cnpg_clusters': (k3s_preflight_cnpg_raw.stdout | from_json).items}) if k3s_health_expect_cnpg | bool else none %}
+          {% set _ = result.update({'cnpg_clusters': (k3s_preflight_cnpg_raw.stdout | from_json)['items']}) if k3s_health_expect_cnpg | bool else none %}
           {{ result | to_json }}
       delegate_to: localhost
       become: false

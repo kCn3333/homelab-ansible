@@ -143,11 +143,11 @@
         stdin: >-
           {% set mounts = {} %}
           {% for selected in [{'id': 'root', 'path': '/'}] + (k3s_health_additional_mounts | dict2items(key_name='id', value_name='path')) %}
-          {% set matches = ansible_mounts | default([]) | selectattr('mount', 'equalto', selected.path) | list %}
+          {% set matches = ansible_facts['mounts'] | default([]) | selectattr('mount', 'equalto', selected.path) | list %}
           {% if matches | length == 1 %}{% set _ = mounts.update({selected.id: {'size_total': matches[0].size_total, 'size_available': matches[0].size_available}}) %}
           {% elif selected.id == 'root' %}{% set _ = mounts.update({'root_matches': matches | length}) %}{% endif %}
           {% endfor %}
-          {{ {'memory_mb': ansible_memory_mb | default(none), 'mounts': mounts,
+          {{ {'memory_mb': ansible_facts['memory_mb'] | default(none), 'mounts': mounts,
               'expected_mount_ids': ['root'] + (k3s_health_additional_mounts.keys() | list)} | to_json }}
       delegate_to: localhost
       become: false
@@ -282,14 +282,14 @@
           {% set result = {'expect': {'flux': k3s_health_expect_flux | bool,
                                       'longhorn': k3s_health_expect_longhorn | bool,
                                       'cnpg': k3s_health_expect_cnpg | bool}} %}
-          {% set _ = result.update({'flux_git_repositories': (k3s_health_flux_raw.results[0].stdout | from_json).items,
-                                    'flux_kustomizations': (k3s_health_flux_raw.results[1].stdout | from_json).items,
-                                    'flux_helm_releases': (k3s_health_flux_raw.results[2].stdout | from_json).items}) if k3s_health_expect_flux | bool else none %}
-          {% set _ = result.update({'longhorn_backup_targets': (k3s_health_longhorn_raw.results[0].stdout | from_json).items,
-                                    'longhorn_volumes': (k3s_health_longhorn_raw.results[1].stdout | from_json).items,
-                                    'longhorn_backups': (k3s_health_longhorn_raw.results[2].stdout | from_json).items,
-                                    'longhorn_engines': (k3s_health_longhorn_raw.results[3].stdout | from_json).items}) if k3s_health_expect_longhorn | bool else none %}
-          {% set _ = result.update({'cnpg_clusters': (k3s_health_cnpg_raw.stdout | from_json).items}) if k3s_health_expect_cnpg | bool else none %}
+          {% set _ = result.update({'flux_git_repositories': (k3s_health_flux_raw.results[0].stdout | from_json)['items'],
+                                    'flux_kustomizations': (k3s_health_flux_raw.results[1].stdout | from_json)['items'],
+                                    'flux_helm_releases': (k3s_health_flux_raw.results[2].stdout | from_json)['items']}) if k3s_health_expect_flux | bool else none %}
+          {% set _ = result.update({'longhorn_backup_targets': (k3s_health_longhorn_raw.results[0].stdout | from_json)['items'],
+                                    'longhorn_volumes': (k3s_health_longhorn_raw.results[1].stdout | from_json)['items'],
+                                    'longhorn_backups': (k3s_health_longhorn_raw.results[2].stdout | from_json)['items'],
+                                    'longhorn_engines': (k3s_health_longhorn_raw.results[3].stdout | from_json)['items']}) if k3s_health_expect_longhorn | bool else none %}
+          {% set _ = result.update({'cnpg_clusters': (k3s_health_cnpg_raw.stdout | from_json)['items']}) if k3s_health_expect_cnpg | bool else none %}
           {{ result | to_json }}
       delegate_to: localhost
       become: false
@@ -304,21 +304,21 @@
 
     - name: Parse successfully returned cluster resources
       ansible.builtin.set_fact:
-        k3s_health_nodes: "{{ (k3s_health_core_raw.results[0].stdout | from_json).items }}"
+        k3s_health_nodes: "{{ (k3s_health_core_raw.results[0].stdout | from_json)['items'] }}"
         k3s_health_pod_evaluation: "{{ k3s_health_pod_evaluation_raw.stdout | from_json }}"
         k3s_health_integration_evaluation: "{{ k3s_health_integrations_raw.stdout | from_json }}"
         k3s_health_flux_resources: >-
-          {{ ((k3s_health_flux_raw.results[0].stdout | from_json).items
-              + (k3s_health_flux_raw.results[1].stdout | from_json).items
-              + (k3s_health_flux_raw.results[2].stdout | from_json).items) if k3s_health_expect_flux | bool else [] }}
+          {{ ((k3s_health_flux_raw.results[0].stdout | from_json)['items']
+              + (k3s_health_flux_raw.results[1].stdout | from_json)['items']
+              + (k3s_health_flux_raw.results[2].stdout | from_json)['items']) if k3s_health_expect_flux | bool else [] }}
         k3s_health_flux_kind_counts: >-
-          {{ [(k3s_health_flux_raw.results[0].stdout | from_json).items | length,
-              (k3s_health_flux_raw.results[1].stdout | from_json).items | length,
-              (k3s_health_flux_raw.results[2].stdout | from_json).items | length] if k3s_health_expect_flux | bool else [] }}
-        k3s_health_backup_targets: "{{ (k3s_health_longhorn_raw.results[0].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
-        k3s_health_volumes: "{{ (k3s_health_longhorn_raw.results[1].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
-        k3s_health_backups: "{{ (k3s_health_longhorn_raw.results[2].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
-        k3s_health_cnpg_clusters: "{{ (k3s_health_cnpg_raw.stdout | from_json).items if k3s_health_expect_cnpg | bool else [] }}"
+          {{ [(k3s_health_flux_raw.results[0].stdout | from_json)['items'] | length,
+              (k3s_health_flux_raw.results[1].stdout | from_json)['items'] | length,
+              (k3s_health_flux_raw.results[2].stdout | from_json)['items'] | length] if k3s_health_expect_flux | bool else [] }}
+        k3s_health_backup_targets: "{{ (k3s_health_longhorn_raw.results[0].stdout | from_json)['items'] if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_volumes: "{{ (k3s_health_longhorn_raw.results[1].stdout | from_json)['items'] if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_backups: "{{ (k3s_health_longhorn_raw.results[2].stdout | from_json)['items'] if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_cnpg_clusters: "{{ (k3s_health_cnpg_raw.stdout | from_json)['items'] if k3s_health_expect_cnpg | bool else [] }}"
       when:
         - k3s_tcp_reachable | default(false) | bool
         - k3s_health_core_raw.results | default([]) | length == 3
