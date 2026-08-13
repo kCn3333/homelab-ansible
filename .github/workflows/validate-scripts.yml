@@ -21,7 +21,7 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y ripgrep shellcheck
           python3 -m pip install --disable-pip-version-check 'ansible-core>=2.18,<2.20'
 
       - name: Check Bash syntax
