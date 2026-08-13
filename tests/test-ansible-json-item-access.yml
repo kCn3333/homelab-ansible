@@ -1,5 +1,28 @@
 ---
-- name: Verify unambiguous Kubernetes JSON item access
+- name: Build an isolated lifecycle inventory for runtime type checks
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Add fictional K3s hosts without opening connections
+      ansible.builtin.add_host:
+        name: "{{ item.inventory_hostname }}"
+        groups: k3s_runtime_cluster
+        k3s_node_name: "{{ item.k3s_node_name }}"
+        k3s_tcp_reachable: true
+        k3s_host_critical: false
+        k3s_host_warning: false
+      loop:
+        - inventory_hostname: host1
+          k3s_node_name: master
+        - inventory_hostname: host2
+          k3s_node_name: worker1
+        - inventory_hostname: host3
+          k3s_node_name: worker2
+      changed_when: false
+
+- name: Verify native lifecycle collections and JSON item access
   hosts: localhost
   connection: local
   gather_facts: false
@@ -7,6 +30,12 @@
   vars:
     kubernetes_response: >-
       {"apiVersion": "v1", "items": [{"metadata": {"name": "example"}}]}
+    live_nodes_response: >-
+      {"apiVersion": "v1", "items": [
+        {"metadata": {"name": "master"}},
+        {"metadata": {"name": "worker1"}},
+        {"metadata": {"name": "worker2"}}
+      ]}
   tasks:
     - name: Parse and serialize the Kubernetes items field
       ansible.builtin.set_fact:
@@ -21,3 +50,164 @@
           - serialized_items | from_json | type_debug == 'list'
           - parsed_items[0]['metadata']['name'] == 'example'
           - (serialized_items | from_json)[0]['metadata']['name'] == 'example'
+
+    - name: Reproduce legacy literal collection types
+      ansible.builtin.set_fact:
+        legacy_expected_node_names: >-
+          [{% for host in groups.k3s_runtime_cluster %}{{ hostvars[host].k3s_node_name | default(host) | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        legacy_empty_unreachable: >-
+          [{% for host in groups.k3s_runtime_cluster if not (hostvars[host].k3s_tcp_reachable | default(false) | bool) %}{{ host | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+    - name: Build native lifecycle collections
+      ansible.builtin.set_fact:
+        runtime_expected_node_names: >-
+          {%- set result = [] -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- set _ = result.append(hostvars[host].k3s_node_name | default(host)) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_unreachable_hosts: >-
+          {%- set result = [] -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- if not (hostvars[host].k3s_tcp_reachable | default(false) | bool) -%}
+          {%- set _ = result.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_one_unreachable_host: >-
+          {%- set result = [] -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- if host == 'host2' -%}{%- set _ = result.append(host) -%}{%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_host_critical_nodes: >-
+          {%- set result = [] -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- if hostvars[host].k3s_host_critical | default(true) | bool -%}
+          {%- set _ = result.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_host_warning_nodes: >-
+          {%- set result = [] -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- if hostvars[host].k3s_host_warning | default(false) | bool -%}
+          {%- set _ = result.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_live_node_names: >-
+          {{ (live_nodes_response | from_json)['items']
+             | map(attribute='metadata.name') | list }}
+        runtime_worker_power_results: >-
+          {%- set result = {} -%}
+          {%- for worker in ['host2', 'host3'] -%}
+          {%- set _ = result.update({worker: false}) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_issue_list: >-
+          {%- set result = [] -%}
+          {%- for node in (live_nodes_response | from_json)['items'] -%}
+          {%- set ready = [{'type': 'Ready', 'status': 'True'}]
+              | selectattr('type', 'equalto', 'Ready')
+              | selectattr('status', 'equalto', 'True') | list -%}
+          {%- if ready | length == 0 -%}
+          {%- set _ = result.append(node.metadata.name) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_unready_flux: >-
+          {%- set result = [] -%}
+          {%- for resource in [] -%}
+          {%- set _ = result.append(resource) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_unavailable_backup_targets: >-
+          {%- set result = [] -%}
+          {%- for target in [] -%}
+          {%- set _ = result.append(target) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_unhealthy_volumes: >-
+          {%- set result = [] -%}
+          {%- for volume in [] -%}
+          {%- set _ = result.append(volume) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_active_or_unknown_backups: >-
+          {%- set result = [] -%}
+          {%- for backup in [] -%}
+          {%- set _ = result.append(backup) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_unready_cnpg: >-
+          {%- set result = [] -%}
+          {%- for cluster in [] -%}
+          {%- set _ = result.append(cluster) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_host_report: >-
+          {%- set result = {} -%}
+          {%- for host in groups.k3s_runtime_cluster -%}
+          {%- set _ = result.update({host: {'state': 'REACHABLE'}}) -%}
+          {%- endfor -%}
+          {{ result }}
+        runtime_last_backup_report: >-
+          {%- set result = {} -%}
+          {%- for volume in [] -%}
+          {%- set _ = result.update({volume: 'none'}) -%}
+          {%- endfor -%}
+          {{ result }}
+
+    - name: Build the healthy report regression classifications
+      ansible.builtin.set_fact:
+        runtime_nodes_missing: >-
+          {{ runtime_expected_node_names | difference(runtime_live_node_names) }}
+        runtime_nodes_unexpected: >-
+          {{ runtime_live_node_names | difference(runtime_expected_node_names) }}
+        runtime_critical: >-
+          {{ (['inventory_host_unreachable'] if runtime_unreachable_hosts | length > 0 else [])
+             + (['host_health'] if runtime_host_critical_nodes | length > 0 else [])
+             + (['node_name_not_unique'] if runtime_expected_node_names | unique | length != runtime_expected_node_names | length else [])
+             + (['node_set_mismatch'] if (runtime_expected_node_names | difference(runtime_live_node_names) | length > 0 or runtime_live_node_names | difference(runtime_expected_node_names) | length > 0) else []) }}
+        runtime_warnings: >-
+          {{ (['host_warning'] if runtime_host_warning_nodes | length > 0 else [])
+             + runtime_issue_list }}
+
+    - name: Require native collection semantics and healthy report output
+      ansible.builtin.assert:
+        that:
+          - legacy_expected_node_names | type_debug == 'str'
+          - legacy_empty_unreachable | type_debug == 'str'
+          - legacy_empty_unreachable | length == 2
+          - runtime_expected_node_names | type_debug == 'list'
+          - runtime_expected_node_names == ['master', 'worker1', 'worker2']
+          - runtime_expected_node_names | sort == ['master', 'worker1', 'worker2'] | sort
+          - runtime_unreachable_hosts | type_debug == 'list'
+          - runtime_unreachable_hosts | length == 0
+          - runtime_one_unreachable_host | type_debug == 'list'
+          - runtime_one_unreachable_host == ['host2']
+          - runtime_host_critical_nodes | type_debug == 'list'
+          - runtime_host_warning_nodes | type_debug == 'list'
+          - runtime_live_node_names | type_debug == 'list'
+          - runtime_nodes_missing | type_debug == 'list'
+          - runtime_nodes_unexpected | type_debug == 'list'
+          - runtime_nodes_missing | length == 0
+          - runtime_nodes_unexpected | length == 0
+          - runtime_worker_power_results is mapping
+          - runtime_worker_power_results.values() | select('sameas', false) | list | length == 2
+          - runtime_issue_list | type_debug == 'list'
+          - runtime_unready_flux | type_debug == 'list'
+          - runtime_unavailable_backup_targets | type_debug == 'list'
+          - runtime_unhealthy_volumes | type_debug == 'list'
+          - runtime_active_or_unknown_backups | type_debug == 'list'
+          - runtime_unready_cnpg | type_debug == 'list'
+          - runtime_host_report is mapping
+          - runtime_last_backup_report is mapping
+          - runtime_critical | type_debug == 'list'
+          - runtime_warnings | type_debug == 'list'
+          - runtime_critical | length == 0
+          - "'inventory_host_unreachable' not in runtime_critical"
+          - "'host_health' not in runtime_critical"
+          - "'node_name_not_unique' not in runtime_critical"
+          - "'node_set_mismatch' not in runtime_critical"
