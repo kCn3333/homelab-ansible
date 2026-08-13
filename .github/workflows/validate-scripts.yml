@@ -1,5 +1,5 @@
 ---
-name: Validate onboarding scripts
+name: Validate public automation helpers
 
 on:
   pull_request:
@@ -19,7 +19,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install validation tools
-        run: sudo apt-get update && sudo apt-get install -y shellcheck ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep shellcheck
+          python3 -m pip install --disable-pip-version-check 'ansible-core>=2.18,<2.20'
 
       - name: Check Bash syntax
         run: bash -n scripts/*.sh tests/*.sh
@@ -28,31 +31,85 @@ jobs:
         run: shellcheck scripts/*.sh tests/*.sh
 
       - name: Run functional tests
+        # The isolated bootstrap test may download its container and packages;
+        # it never connects to managed infrastructure.
         run: |
           tests/test-audit-managed-host.sh
           tests/test-build-known-hosts-entry.sh
           tests/test-upsert-known-hosts-entry.sh
+          set +e
           tests/test-bootstrap-managed-host.sh
+          bootstrap_rc=$?
+          set -e
+          case "$bootstrap_rc" in
+            0) echo "bootstrap-managed-host: PASS" ;;
+            77) echo "bootstrap-managed-host: SKIP" ;;
+            *) echo "bootstrap-managed-host: FAIL" >&2; exit "$bootstrap_rc" ;;
+          esac
+          python3 tests/test-send-wol.py
+          python3 tests/test-evaluate-k3s-health.py
+
+      - name: Compile Python helpers
+        run: python3 -m compileall -q cluster/scripts scripts tests
+
+      - name: Parse workflow YAML
+        run: python3 -c 'import pathlib, yaml; yaml.safe_load(pathlib.Path(".github/workflows/validate-scripts.yml").read_text())'
+
+      - name: Syntax-check every public playbook
+        run: |
+          validation_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$validation_dir"' EXIT
+          inventory="$validation_dir/inventory.yml"
+          cat >"$inventory" <<'YAML'
+          all:
+            hosts:
+              host1:
+                ansible_connection: local
+                ansible_host: 192.0.2.10
+                mac_address: "02:00:00:00:00:01"
+              host2:
+                ansible_connection: local
+                ansible_host: 192.0.2.11
+                mac_address: "02:00:00:00:00:02"
+              host3:
+                ansible_connection: local
+                ansible_host: 192.0.2.12
+                mac_address: "02:00:00:00:00:03"
+            children:
+              masters:
+                hosts:
+                  host1:
+              workers:
+                hosts:
+                  host2:
+                  host3:
+              k3s_cluster:
+                children:
+                  masters:
+                  workers:
+              k3s_servers:
+                children:
+                  k3s_cluster:
+              homelab_managed:
+                hosts:
+                  host1:
+              update_standard:
+                hosts:
+                  host1:
+              update_automatic:
+                hosts:
+                  host1:
+              reboot_approved:
+                hosts:
+                  host1:
+          YAML
+          export ANSIBLE_LOCAL_TEMP="$validation_dir/ansible-local"
+          while IFS= read -r playbook; do
+            ansible-playbook -i "$inventory" "$playbook" --syntax-check
+          done < <(find cluster/playbooks homelab/playbooks -type f -name '*.yml' -print | sort)
 
       - name: Scan public repository
-        run: |
-          scan_paths=(scripts tests docs .github README.md homelab/README.md)
-          if rg -q -- '-----BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]+' "${scan_paths[@]}"; then
-            echo "Potential secret material detected." >&2
-            exit 1
-          fi
-          if rg --pcre2 '(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])' "${scan_paths[@]}" | rg -qv '192\.0\.2\.0/24'; then
-            echo "Unexpected IPv4 address detected." >&2
-            exit 1
-          fi
-          if rg -q --pcre2 '(?<![[:alnum:]])(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}(?![[:alnum:]])' "${scan_paths[@]}"; then
-            echo "Unexpected IPv6 address detected." >&2
-            exit 1
-          fi
-          if rg -q 'https?://|[[:alnum:]-]+\.(com|net|org|io|dev|local|lan|internal)([^[:alnum:]-]|$)' "${scan_paths[@]}"; then
-            echo "Unexpected domain or URL detected." >&2
-            exit 1
-          fi
+        run: scripts/scan-public-tree.py scripts tests cluster docs .github README.md homelab/README.md
 
       - name: Check whitespace
         run: git diff --check

@@ -1,0 +1,489 @@
+---
+- name: Probe every K3s inventory host from the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    k3s_health_connect_timeout: 3
+  tasks:
+    - name: Require valid health mode and cluster inventory
+      ansible.builtin.assert:
+        that:
+          - "'masters' in groups"
+          - "'workers' in groups"
+          - "'k3s_cluster' in groups"
+          - groups.k3s_cluster | length > 0
+          - groups.masters | length == 1
+          - groups.masters | intersect(groups.workers) | length == 0
+          - groups.k3s_cluster | sort == (groups.masters + groups.workers) | unique | sort
+          - k3s_health_mode | default('report') in ['report', 'strict']
+
+    - name: Probe each inventory SSH port
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item].ansible_host }}"
+        port: "{{ hostvars[item].ansible_port | default(22) }}"
+        state: started
+        connect_timeout: "{{ k3s_health_connect_timeout }}"
+        timeout: "{{ k3s_health_connect_timeout }}"
+      loop: "{{ groups.k3s_cluster }}"
+      loop_control:
+        label: "{{ item }}"
+      register: k3s_health_tcp
+      failed_when: false
+
+    - name: Persist reachability on every inventory host
+      ansible.builtin.add_host:
+        name: "{{ item.item }}"
+        k3s_tcp_reachable: "{{ not (item.failed | default(false)) }}"
+        k3s_health_state: "{{ 'REACHABLE' if not (item.failed | default(false)) else 'UNREACHABLE' }}"
+      loop: "{{ k3s_health_tcp.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: false
+
+- name: Collect minimal read-only health from reachable K3s hosts
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  ignore_unreachable: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+    k3s_service_name: k3s
+    k3s_memory_warning_percent: 80
+    k3s_memory_critical_percent: 90
+    k3s_filesystem_warning_percent: 80
+    k3s_filesystem_critical_percent: 90
+    k3s_health_additional_mounts: {}
+  tasks:
+    - name: Gather facts only after successful controller probe
+      ansible.builtin.setup:
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Inspect the configured K3s binary
+      ansible.builtin.stat:
+        path: "{{ k3s_binary_path }}"
+        follow: false
+      register: k3s_health_binary
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Read K3s service activity
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ k3s_service_name }}"]
+      register: k3s_health_service
+      changed_when: false
+      failed_when: false
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Read failed systemd units
+      ansible.builtin.command:
+        argv: [systemctl, --failed, --no-legend, --plain, --no-pager]
+      register: k3s_health_failed_units
+      changed_when: false
+      failed_when: false
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Check reboot-required marker
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: k3s_health_reboot_required
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Read K3s version
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", --version]
+      register: k3s_health_version
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_binary.stat.exists | default(false)
+        - k3s_health_binary.stat.isreg | default(false)
+        - not (k3s_health_binary.stat.islnk | default(false))
+        - k3s_health_binary.stat.executable | default(false)
+
+    - name: Read local API readiness with etcd backend check
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
+      register: k3s_health_local_readyz
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_binary.stat.exists | default(false)
+        - k3s_health_binary.stat.executable | default(false)
+
+    - name: Validate abstract additional filesystem identifiers
+      ansible.builtin.assert:
+        that:
+          - k3s_health_additional_mounts is mapping
+          - item.key is match('^[a-z0-9][a-z0-9_-]*$')
+          - item.key != 'root'
+          - item.value is string
+          - item.value | length > 0
+      loop: "{{ k3s_health_additional_mounts | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Calculate validated memory and filesystem metrics locally
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/../../scripts/evaluate-k3s-health.py"
+          - metrics
+          - --warning-percent
+          - "{{ k3s_memory_warning_percent | string }}"
+          - --critical-percent
+          - "{{ k3s_memory_critical_percent | string }}"
+          - --filesystem-warning-percent
+          - "{{ k3s_filesystem_warning_percent | string }}"
+          - --filesystem-critical-percent
+          - "{{ k3s_filesystem_critical_percent | string }}"
+        stdin: >-
+          {% set mounts = {} %}
+          {% for selected in [{'id': 'root', 'path': '/'}] + (k3s_health_additional_mounts | dict2items(key_name='id', value_name='path')) %}
+          {% set matches = ansible_mounts | default([]) | selectattr('mount', 'equalto', selected.path) | list %}
+          {% if matches | length == 1 %}{% set _ = mounts.update({selected.id: {'size_total': matches[0].size_total, 'size_available': matches[0].size_available}}) %}
+          {% elif selected.id == 'root' %}{% set _ = mounts.update({'root_matches': matches | length}) %}{% endif %}
+          {% endfor %}
+          {{ {'memory_mb': ansible_memory_mb | default(none), 'mounts': mounts,
+              'expected_mount_ids': ['root'] + (k3s_health_additional_mounts.keys() | list)} | to_json }}
+      delegate_to: localhost
+      become: false
+      register: k3s_health_metrics_raw
+      changed_when: false
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Store host health summary
+      ansible.builtin.set_fact:
+        k3s_host_summary:
+          state: REACHABLE
+          memory: "{{ (k3s_health_metrics_raw.stdout | from_json).memory }}"
+          filesystems: "{{ (k3s_health_metrics_raw.stdout | from_json).filesystems }}"
+          k3s_active: "{{ k3s_health_service.stdout | default('unknown') == 'active' }}"
+          k3s_version: "{{ k3s_health_version.stdout_lines | default(['unavailable']) | first }}"
+          api_with_etcd_backend_ready: >-
+            {{ k3s_health_local_readyz.rc | default(1) == 0
+               and 'readyz check passed' in k3s_health_local_readyz.stdout | default('')
+               and '[+]etcd ok' in k3s_health_local_readyz.stdout | default('') }}
+          failed_systemd_unit_count: "{{ k3s_health_failed_units.stdout_lines | default([]) | length }}"
+          reboot_required: "{{ k3s_health_reboot_required.stat.exists | default(false) }}"
+        k3s_host_critical: >-
+          {{ k3s_health_service.stdout | default('unknown') != 'active'
+             or k3s_health_binary.stat.exists | default(false) == false
+             or k3s_health_binary.stat.isreg | default(false) == false
+             or k3s_health_binary.stat.islnk | default(false)
+             or k3s_health_binary.stat.executable | default(false) == false
+             or k3s_health_local_readyz.rc | default(1) != 0
+             or 'readyz check passed' not in k3s_health_local_readyz.stdout | default('')
+             or '[+]etcd ok' not in k3s_health_local_readyz.stdout | default('')
+             or (k3s_health_metrics_raw.stdout | from_json).memory.health == 'critical'
+             or (k3s_health_metrics_raw.stdout | from_json).filesystems | selectattr('health', 'equalto', 'critical') | list | length > 0 }}
+        k3s_host_warning: >-
+          {{ k3s_health_failed_units.stdout_lines | default([]) | length > 0
+             or k3s_health_reboot_required.stat.exists | default(false)
+             or (k3s_health_metrics_raw.stdout | from_json).memory.health == 'warning'
+             or (k3s_health_metrics_raw.stdout | from_json).filesystems | selectattr('health', 'equalto', 'warning') | list | length > 0 }}
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Reactivate unreachable hosts for final local aggregation
+      ansible.builtin.meta: clear_host_errors
+
+- name: Query Kubernetes resources from the operational master when reachable
+  hosts: masters
+  gather_facts: false
+  become: true
+  ignore_unreachable: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+    k3s_pod_pending_grace_seconds: 300
+    k3s_health_expect_flux: true
+    k3s_health_expect_longhorn: true
+    k3s_health_expect_cnpg: true
+  tasks:
+    - name: Initialize cluster query state
+      ansible.builtin.set_fact:
+        k3s_cluster_query_completed: false
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Read Kubernetes Nodes pods and Jobs
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
+      loop: [nodes, pods, jobs]
+      register: k3s_health_core_raw
+      changed_when: false
+      failed_when: false
+      when: k3s_tcp_reachable | default(false) | bool
+
+    - name: Classify pod data locally
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/../../scripts/evaluate-k3s-health.py"
+          - pods
+          - --pending-grace-seconds
+          - "{{ k3s_pod_pending_grace_seconds | string }}"
+        stdin: >-
+          {{ {'pods': k3s_health_core_raw.results[1].stdout | from_json,
+              'jobs': k3s_health_core_raw.results[2].stdout | from_json} | to_json }}
+      delegate_to: localhost
+      become: false
+      register: k3s_health_pod_evaluation_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_core_raw.results[1].rc | default(1) == 0
+
+    - name: Read expected Flux resource kinds
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
+      loop:
+        - gitrepositories.source.toolkit.fluxcd.io
+        - kustomizations.kustomize.toolkit.fluxcd.io
+        - helmreleases.helm.toolkit.fluxcd.io
+      register: k3s_health_flux_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_expect_flux | bool
+
+    - name: Read expected Longhorn resource kinds
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
+      loop:
+        - backuptargets.longhorn.io
+        - volumes.longhorn.io
+        - backups.longhorn.io
+        - engines.longhorn.io
+      register: k3s_health_longhorn_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_expect_longhorn | bool
+
+    - name: Read expected CloudNativePG clusters
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, clusters.postgresql.cnpg.io, --all-namespaces, "--output=json"]
+      register: k3s_health_cnpg_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_expect_cnpg | bool
+
+    - name: Classify expected integration state locally
+      ansible.builtin.command:
+        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/../../scripts/evaluate-k3s-health.py", integrations]
+        stdin: >-
+          {% set result = {'expect': {'flux': k3s_health_expect_flux | bool,
+                                      'longhorn': k3s_health_expect_longhorn | bool,
+                                      'cnpg': k3s_health_expect_cnpg | bool}} %}
+          {% set _ = result.update({'flux_git_repositories': (k3s_health_flux_raw.results[0].stdout | from_json).items,
+                                    'flux_kustomizations': (k3s_health_flux_raw.results[1].stdout | from_json).items,
+                                    'flux_helm_releases': (k3s_health_flux_raw.results[2].stdout | from_json).items}) if k3s_health_expect_flux | bool else none %}
+          {% set _ = result.update({'longhorn_backup_targets': (k3s_health_longhorn_raw.results[0].stdout | from_json).items,
+                                    'longhorn_volumes': (k3s_health_longhorn_raw.results[1].stdout | from_json).items,
+                                    'longhorn_backups': (k3s_health_longhorn_raw.results[2].stdout | from_json).items,
+                                    'longhorn_engines': (k3s_health_longhorn_raw.results[3].stdout | from_json).items}) if k3s_health_expect_longhorn | bool else none %}
+          {% set _ = result.update({'cnpg_clusters': (k3s_health_cnpg_raw.stdout | from_json).items}) if k3s_health_expect_cnpg | bool else none %}
+          {{ result | to_json }}
+      delegate_to: localhost
+      become: false
+      register: k3s_health_integrations_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - not (k3s_health_expect_flux | bool) or k3s_health_flux_raw.results | default([]) | selectattr('rc', 'equalto', 0) | list | length == 3
+        - not (k3s_health_expect_longhorn | bool) or k3s_health_longhorn_raw.results | default([]) | selectattr('rc', 'equalto', 0) | list | length == 4
+        - not (k3s_health_expect_cnpg | bool) or k3s_health_cnpg_raw.rc | default(1) == 0
+
+    - name: Parse successfully returned cluster resources
+      ansible.builtin.set_fact:
+        k3s_health_nodes: "{{ (k3s_health_core_raw.results[0].stdout | from_json).items }}"
+        k3s_health_pod_evaluation: "{{ k3s_health_pod_evaluation_raw.stdout | from_json }}"
+        k3s_health_integration_evaluation: "{{ k3s_health_integrations_raw.stdout | from_json }}"
+        k3s_health_flux_resources: >-
+          {{ ((k3s_health_flux_raw.results[0].stdout | from_json).items
+              + (k3s_health_flux_raw.results[1].stdout | from_json).items
+              + (k3s_health_flux_raw.results[2].stdout | from_json).items) if k3s_health_expect_flux | bool else [] }}
+        k3s_health_flux_kind_counts: >-
+          {{ [(k3s_health_flux_raw.results[0].stdout | from_json).items | length,
+              (k3s_health_flux_raw.results[1].stdout | from_json).items | length,
+              (k3s_health_flux_raw.results[2].stdout | from_json).items | length] if k3s_health_expect_flux | bool else [] }}
+        k3s_health_backup_targets: "{{ (k3s_health_longhorn_raw.results[0].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_volumes: "{{ (k3s_health_longhorn_raw.results[1].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_backups: "{{ (k3s_health_longhorn_raw.results[2].stdout | from_json).items if k3s_health_expect_longhorn | bool else [] }}"
+        k3s_health_cnpg_clusters: "{{ (k3s_health_cnpg_raw.stdout | from_json).items if k3s_health_expect_cnpg | bool else [] }}"
+      when:
+        - k3s_tcp_reachable | default(false) | bool
+        - k3s_health_core_raw.results | default([]) | length == 3
+        - k3s_health_core_raw.results | selectattr('rc', 'equalto', 0) | list | length == 3
+        - k3s_health_pod_evaluation_raw.rc | default(1) == 0
+        - k3s_health_integrations_raw.rc | default(1) == 0
+        - not (k3s_health_expect_flux | bool) or k3s_health_flux_raw.results | default([]) | selectattr('rc', 'equalto', 0) | list | length == 3
+        - not (k3s_health_expect_longhorn | bool) or k3s_health_longhorn_raw.results | default([]) | selectattr('rc', 'equalto', 0) | list | length == 4
+        - not (k3s_health_expect_cnpg | bool) or k3s_health_cnpg_raw.rc | default(1) == 0
+
+    - name: Mark complete cluster query parsing
+      ansible.builtin.set_fact:
+        k3s_cluster_query_completed: true
+      when: k3s_health_nodes is defined
+
+    - name: Reactivate an unreachable master for final local aggregation
+      ansible.builtin.meta: clear_host_errors
+
+- name: Aggregate and enforce the complete health report locally
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    k3s_health_mode: report
+    k3s_health_expect_flux: true
+    k3s_health_expect_longhorn: true
+    k3s_health_expect_cnpg: true
+    k3s_ntfy_enabled: false
+  tasks:
+    - name: Identify the operational master and expected Node names
+      ansible.builtin.set_fact:
+        k3s_health_master: "{{ groups.masters | first if groups.masters | length == 1 else '' }}"
+        k3s_expected_node_names: >-
+          [{% for host in groups.k3s_cluster %}{{ hostvars[host].k3s_node_name | default(host) | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+    - name: Build host failure lists
+      ansible.builtin.set_fact:
+        k3s_unreachable_hosts: >-
+          [{% for host in groups.k3s_cluster if not (hostvars[host].k3s_tcp_reachable | default(false) | bool) %}{{ host | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        k3s_host_critical_nodes: >-
+          [{% for host in groups.k3s_cluster if hostvars[host].k3s_host_critical | default(true) | bool %}{{ host | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        k3s_host_warning_nodes: >-
+          [{% for host in groups.k3s_cluster if hostvars[host].k3s_host_warning | default(false) | bool %}{{ host | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+    - name: Load safely parsed cluster summaries or empty unknown state
+      ansible.builtin.set_fact:
+        k3s_cluster_query_completed: "{{ hostvars[k3s_health_master].k3s_cluster_query_completed | default(false) | bool if k3s_health_master else false }}"
+        k3s_health_nodes: "{{ hostvars[k3s_health_master].k3s_health_nodes | default([]) if k3s_health_master else [] }}"
+        k3s_health_pod_evaluation: "{{ hostvars[k3s_health_master].k3s_health_pod_evaluation | default({'critical': [], 'warnings': []}) if k3s_health_master else {'critical': [], 'warnings': []} }}"
+        k3s_health_flux_resources: "{{ hostvars[k3s_health_master].k3s_health_flux_resources | default([]) if k3s_health_master else [] }}"
+        k3s_health_flux_kind_counts: "{{ hostvars[k3s_health_master].k3s_health_flux_kind_counts | default([]) if k3s_health_master else [] }}"
+        k3s_health_backup_targets: "{{ hostvars[k3s_health_master].k3s_health_backup_targets | default([]) if k3s_health_master else [] }}"
+        k3s_health_volumes: "{{ hostvars[k3s_health_master].k3s_health_volumes | default([]) if k3s_health_master else [] }}"
+        k3s_health_backups: "{{ hostvars[k3s_health_master].k3s_health_backups | default([]) if k3s_health_master else [] }}"
+        k3s_health_cnpg_clusters: "{{ hostvars[k3s_health_master].k3s_health_cnpg_clusters | default([]) if k3s_health_master else [] }}"
+        k3s_health_integration_evaluation: "{{ hostvars[k3s_health_master].k3s_health_integration_evaluation | default({'critical': []}) if k3s_health_master else {'critical': []} }}"
+
+    - name: Derive safe resource issue lists
+      ansible.builtin.set_fact:
+        k3s_live_node_names: "{{ k3s_health_nodes | map(attribute='metadata.name') | list }}"
+        k3s_not_ready_nodes: >-
+          {%- set result = [] -%}{%- for node in k3s_health_nodes -%}
+          {%- set ready = node.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list -%}
+          {%- if ready | length == 0 -%}{%- set _ = result.append(node.metadata.name | default('unknown')) -%}{%- endif -%}
+          {%- endfor -%}{{ result }}
+        k3s_unready_flux: >-
+          {%- set result = [] -%}{%- for resource in k3s_health_flux_resources -%}
+          {%- set ready = (resource.status | default({}, true)).conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list -%}
+          {%- if ready | length == 0 -%}{%- set _ = result.append(resource.kind | default('unknown') ~ '/' ~ resource.metadata.name | default('unknown')) -%}{%- endif -%}
+          {%- endfor -%}{{ result }}
+        k3s_unavailable_backup_targets: >-
+          {%- set result = [] -%}{%- for target in k3s_health_backup_targets -%}
+          {%- if (target.status | default({}, true)).available | default(false) != true -%}{%- set _ = result.append(target.metadata.name | default('unknown')) -%}{%- endif -%}
+          {%- endfor -%}{{ result }}
+        k3s_unhealthy_volumes: >-
+          {%- set result = [] -%}{%- for volume in k3s_health_volumes -%}
+          {%- if (volume.status | default({}, true)).robustness | default('Unknown') != 'healthy' or (volume.status | default({}, true)).restoreRequired | default(false) | bool -%}
+          {%- set _ = result.append(volume.metadata.name | default('unknown')) -%}{%- endif -%}{%- endfor -%}{{ result }}
+        k3s_active_or_unknown_backups: >-
+          {%- set result = [] -%}{%- for backup in k3s_health_backups -%}
+          {%- if (backup.status | default({}, true)).state | default('Unknown') in ['New', 'Pending', 'InProgress', 'Error', 'Unknown'] -%}
+          {%- set _ = result.append(backup.metadata.name | default('unknown')) -%}{%- endif -%}{%- endfor -%}{{ result }}
+        k3s_unready_cnpg: >-
+          {%- set result = [] -%}{%- for cluster in k3s_health_cnpg_clusters -%}
+          {%- set ready = (cluster.status | default({}, true)).conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list -%}
+          {%- if ready | length == 0 or (cluster.status | default({}, true)).readyInstances | default(-1, true) | int != (cluster.spec | default({}, true)).instances | default(-2, true) | int or (cluster.status | default({}, true)).currentPrimary | default('', true) | length == 0 -%}
+          {%- set _ = result.append(cluster.metadata.name | default('unknown')) -%}{%- endif -%}{%- endfor -%}{{ result }}
+
+    - name: Build critical warning and info classifications
+      ansible.builtin.set_fact:
+        k3s_health_critical: >-
+          {{ (['inventory_host_unreachable'] if k3s_unreachable_hosts | length > 0 else [])
+             + (['host_health'] if k3s_host_critical_nodes | length > 0 else [])
+             + (['cluster_query_or_parser_failed'] if not k3s_cluster_query_completed else [])
+             + (['node_name_not_unique'] if k3s_expected_node_names | unique | length != groups.k3s_cluster | length else [])
+             + (['node_set_mismatch'] if k3s_expected_node_names | sort != k3s_live_node_names | sort else [])
+             + (['node_not_ready'] if k3s_not_ready_nodes | length > 0 else [])
+             + (['unsafe_pods'] if k3s_health_pod_evaluation.critical | length > 0 else [])
+             + (['integration_health'] if k3s_health_integration_evaluation.critical | length > 0 else [])
+             + (['flux_missing_or_unready'] if k3s_health_expect_flux | bool and (k3s_health_flux_kind_counts | length != 3 or 0 in k3s_health_flux_kind_counts or k3s_unready_flux | length > 0) else [])
+             + (['longhorn_missing_or_unhealthy'] if k3s_health_expect_longhorn | bool and (k3s_health_backup_targets | length == 0 or k3s_health_volumes | length == 0 or k3s_unavailable_backup_targets | length > 0 or k3s_unhealthy_volumes | length > 0 or k3s_active_or_unknown_backups | length > 0) else [])
+             + (['cnpg_missing_or_unready'] if k3s_health_expect_cnpg | bool and (k3s_health_cnpg_clusters | length == 0 or k3s_unready_cnpg | length > 0) else []) }}
+        k3s_health_warnings: >-
+          {{ (['host_warning'] if k3s_host_warning_nodes | length > 0 else [])
+             + (['pod_transition_or_historical_job'] if k3s_health_pod_evaluation.warnings | length > 0 else []) }}
+        k3s_health_info:
+          flux: "{{ 'CHECKED' if k3s_health_expect_flux | bool else 'NOT_CHECKED' }}"
+          longhorn: "{{ 'CHECKED' if k3s_health_expect_longhorn | bool else 'NOT_CHECKED' }}"
+          cnpg: "{{ 'CHECKED' if k3s_health_expect_cnpg | bool else 'NOT_CHECKED' }}"
+
+    - name: Report complete health summary without manifests or connection data
+      ansible.builtin.debug:
+        msg:
+          mode: "{{ k3s_health_mode }}"
+          hosts: >-
+            {%- set result = {} -%}{%- for host in groups.k3s_cluster -%}
+            {%- set fallback = {'state': 'HEALTH_CHECK_FAILED' if hostvars[host].k3s_tcp_reachable | default(false) | bool else 'UNREACHABLE'} -%}
+            {%- set _ = result.update({host: hostvars[host].k3s_host_summary | default(fallback)}) -%}
+            {%- endfor -%}{{ result }}
+          nodes_missing: "{{ k3s_expected_node_names | difference(k3s_live_node_names) }}"
+          nodes_unexpected: "{{ k3s_live_node_names | difference(k3s_expected_node_names) }}"
+          nodes_not_ready: "{{ k3s_not_ready_nodes }}"
+          pod_critical: "{{ k3s_health_pod_evaluation.critical }}"
+          pod_warnings: "{{ k3s_health_pod_evaluation.warnings }}"
+          flux_not_ready: "{{ k3s_unready_flux if k3s_health_expect_flux | bool else 'NOT_CHECKED' }}"
+          longhorn:
+            backup_targets_unavailable: "{{ k3s_unavailable_backup_targets if k3s_health_expect_longhorn | bool else 'NOT_CHECKED' }}"
+            volumes_unhealthy: "{{ k3s_unhealthy_volumes if k3s_health_expect_longhorn | bool else 'NOT_CHECKED' }}"
+            active_or_unknown_backups: "{{ k3s_active_or_unknown_backups if k3s_health_expect_longhorn | bool else 'NOT_CHECKED' }}"
+            last_backup: >-
+              {%- if k3s_health_expect_longhorn | bool -%}
+              {%- set result = {} -%}{%- for volume in k3s_health_volumes -%}
+              {%- set _ = result.update({volume.metadata.name | default('unknown'):
+                   (volume.status | default({}, true)).lastBackup | default('none', true)}) -%}
+              {%- endfor -%}{{ result }}
+              {%- else -%}NOT_CHECKED{%- endif -%}
+          cnpg_unready: "{{ k3s_unready_cnpg if k3s_health_expect_cnpg | bool else 'NOT_CHECKED' }}"
+          critical: "{{ k3s_health_critical }}"
+          warnings: "{{ k3s_health_warnings }}"
+          info: "{{ k3s_health_info }}"
+
+    - name: Send optional health notification
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') }}"
+          Title: K3s health report
+          Priority: "{{ 'high' if k3s_health_critical | length > 0 else 'default' }}"
+          Tags: "{{ 'rotating_light' if k3s_health_critical | length > 0 else 'information_source' }}"
+        body: "K3s health {{ k3s_health_mode }} completed for inventory hosts."
+        status_code: 200
+      delegate_to: localhost
+      become: false
+      no_log: true
+      failed_when: false
+      when:
+        - k3s_ntfy_enabled | bool
+        - lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') | length > 0
+        - lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') | length > 0
+
+    - name: Enforce report or strict health policy
+      ansible.builtin.assert:
+        that:
+          - k3s_health_critical | length == 0
+          - k3s_health_mode != 'strict' or k3s_health_warnings | length == 0
+        fail_msg: K3s health policy detected critical problems or strict-mode warnings.
