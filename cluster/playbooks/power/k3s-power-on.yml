@@ -1,0 +1,284 @@
+---
+- name: Validate complete inventory and wake every K3s node
+  hosts: k3s_cluster
+  gather_facts: false
+  become: false
+  vars:
+    k3s_wol_port: 9
+    k3s_wol_count: 3
+    k3s_wol_interval: 0.2
+    k3s_ssh_wait_timeout: 300
+  tasks:
+    - name: Validate and wake the complete cluster from the controller
+      run_once: true
+      delegate_to: localhost
+      become: false
+      block:
+        - name: Require complete unambiguous cluster scope
+          ansible.builtin.assert:
+            that:
+              - "'masters' in groups"
+              - "'workers' in groups"
+              - "'k3s_cluster' in groups"
+              - groups.masters | length == 1
+              - groups.workers | length >= 1
+              - groups.masters | intersect(groups.workers) | length == 0
+              - groups.k3s_cluster | sort == (groups.masters + groups.workers) | unique | sort
+              - ansible_play_hosts_all | sort == groups.k3s_cluster | sort
+              - ansible_limit is not defined or ansible_limit | trim | length == 0
+            fail_msg: Power On requires the complete k3s_cluster scope without --limit.
+
+        - name: Require safe Wake-on-LAN controller parameters
+          ansible.builtin.assert:
+            that:
+              - k3s_wol_broadcast is defined
+              - k3s_wol_broadcast is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+              - k3s_wol_broadcast.split('.') | map('int') | max <= 255
+              - k3s_wol_port | int >= 1
+              - k3s_wol_port | int <= 65535
+              - k3s_wol_count | int >= 1
+              - k3s_wol_count | int <= 100
+              - k3s_wol_interval | float >= 0
+              - k3s_ssh_wait_timeout | int >= 1
+            fail_msg: Valid broadcast, port, count, interval, and timeout values are required.
+
+        - name: Require connection, node-name, and Wake-on-LAN data
+          ansible.builtin.assert:
+            that:
+              - hostvars[item].ansible_host is defined
+              - hostvars[item].ansible_host | string | length > 0
+              - hostvars[item].mac_address is defined
+              - hostvars[item].mac_address is match('^(?:[0-9A-Fa-f]{2}([:-]))(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}$')
+              - ((hostvars[item].mac_address | regex_replace('[:-]', ''))[0:2] | int(base=16)) % 2 == 0
+              - hostvars[item].k3s_node_name | default(item) | string | trim | length > 0
+            fail_msg: Every node requires an address, a unique node name, and a unicast MAC.
+          loop: "{{ groups.k3s_cluster }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Build normalized private identifiers
+          ansible.builtin.set_fact:
+            k3s_normalized_macs: >-
+              {{ groups.k3s_cluster | map('extract', hostvars, 'mac_address')
+                 | map('regex_replace', '[:-]', '') | map('lower') | list }}
+            k3s_expected_node_names: >-
+              [{% for host in groups.k3s_cluster %}{{ hostvars[host].k3s_node_name | default(host) | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+
+        - name: Require unique MAC addresses and Kubernetes Node names
+          ansible.builtin.assert:
+            that:
+              - k3s_normalized_macs | unique | length == groups.k3s_cluster | length
+              - k3s_expected_node_names | unique | length == groups.k3s_cluster | length
+            fail_msg: MAC addresses and Kubernetes Node names must be unique.
+
+        - name: Send Wake-on-LAN packets to every inventory node
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/../../scripts/send-wol.py"
+              - --mac
+              - "{{ hostvars[item].mac_address }}"
+              - --broadcast
+              - "{{ k3s_wol_broadcast }}"
+              - --port
+              - "{{ k3s_wol_port | string }}"
+              - --count
+              - "{{ k3s_wol_count | string }}"
+              - --interval
+              - "{{ k3s_wol_interval | string }}"
+          loop: "{{ groups.k3s_cluster }}"
+          loop_control:
+            label: "{{ item }}"
+          changed_when: true
+          failed_when: false
+          register: k3s_wol_send
+          no_log: true
+
+        - name: Report safe Wake-on-LAN result per node
+          ansible.builtin.debug:
+            msg:
+              host: "{{ item.item }}"
+              category: "{{ 'SENT' if item.rc | default(1) == 0 else 'SEND_FAILED' }}"
+              rc: "{{ item.rc | default(-1) }}"
+          loop: "{{ k3s_wol_send.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Wait for every SSH port without short-circuiting
+          ansible.builtin.wait_for:
+            host: "{{ hostvars[item].ansible_host }}"
+            port: "{{ hostvars[item].ansible_port | default(22) }}"
+            state: started
+            connect_timeout: 3
+            sleep: 2
+            timeout: "{{ k3s_ssh_wait_timeout }}"
+          loop: "{{ groups.k3s_cluster }}"
+          loop_control:
+            label: "{{ item }}"
+          register: k3s_tcp_wait
+          failed_when: false
+
+        - name: Require all sends and TCP recovery attempts to succeed
+          ansible.builtin.assert:
+            that:
+              - k3s_wol_send.results | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list | length == 0
+              - k3s_tcp_wait.results | selectattr('failed', 'defined') | selectattr('failed', 'equalto', true) | list | length == 0
+            fail_msg: A WoL send failed or a required node did not return before timeout.
+
+- name: Validate every recovered K3s server and its local API backend
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+    k3s_service_name: k3s
+    k3s_connection_timeout: 120
+    k3s_api_wait_retries: 30
+    k3s_api_wait_delay: 5
+  tasks:
+    - name: Wait for the managed connection
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ k3s_connection_timeout }}"
+
+    - name: Inspect the configured K3s binary
+      ansible.builtin.stat:
+        path: "{{ k3s_binary_path }}"
+        follow: false
+      register: k3s_binary
+
+    - name: Require a regular executable K3s binary
+      ansible.builtin.assert:
+        that:
+          - k3s_binary.stat.exists | default(false)
+          - k3s_binary.stat.isreg | default(false)
+          - not (k3s_binary.stat.islnk | default(false))
+          - k3s_binary.stat.executable | default(false)
+        fail_msg: k3s_binary_path must identify a regular executable, not a symlink.
+
+    - name: Optionally validate the static system hostname
+      ansible.builtin.command:
+        argv: [hostnamectl, --static]
+      register: k3s_static_hostname
+      changed_when: false
+      when: expected_system_hostname is defined
+
+    - name: Require the optional expected system hostname
+      ansible.builtin.assert:
+        that:
+          - k3s_static_hostname.stdout | trim == expected_system_hostname
+      when: expected_system_hostname is defined
+
+    - name: Check the K3s server service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ k3s_service_name }}"]
+      register: k3s_service_active
+      changed_when: false
+
+    - name: Read failed systemd units
+      ansible.builtin.command:
+        argv: [systemctl, --failed, --no-legend, --plain, --no-pager]
+      register: k3s_failed_units
+      changed_when: false
+
+    - name: Require healthy host services
+      ansible.builtin.assert:
+        that:
+          - k3s_service_active.stdout | trim == 'active'
+          - k3s_failed_units.stdout_lines | length == 0
+
+    - name: Require local API readiness with etcd backend check
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
+      register: k3s_local_readyz
+      changed_when: false
+      retries: "{{ k3s_api_wait_retries }}"
+      delay: "{{ k3s_api_wait_delay }}"
+      until:
+        - k3s_local_readyz.rc == 0
+        - "'readyz check passed' in k3s_local_readyz.stdout"
+        - "'[+]etcd ok' in k3s_local_readyz.stdout"
+
+- name: Validate exact Kubernetes Node set and restore scheduling
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+    k3s_node_ready_timeout: 300s
+    k3s_ntfy_enabled: false
+  tasks:
+    - name: Read live Kubernetes Nodes
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=json"]
+      register: k3s_nodes_raw
+      changed_when: false
+
+    - name: Build expected and live Node sets
+      ansible.builtin.set_fact:
+        k3s_expected_node_names: >-
+          [{% for host in groups.k3s_cluster %}{{ hostvars[host].k3s_node_name | default(host) | to_json }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        k3s_live_node_names: "{{ (k3s_nodes_raw.stdout | from_json).items | map(attribute='metadata.name') | list }}"
+
+    - name: Report and require exact Node membership
+      ansible.builtin.assert:
+        that:
+          - k3s_expected_node_names | sort == k3s_live_node_names | sort
+        fail_msg: >-
+          Node membership mismatch; missing={{ k3s_expected_node_names | difference(k3s_live_node_names) }},
+          unexpected={{ k3s_live_node_names | difference(k3s_expected_node_names) }}.
+
+    - name: Wait for every expected Node to become Ready
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, wait, "--for=condition=Ready", "node/{{ item }}", "--timeout={{ k3s_node_ready_timeout }}"]
+      loop: "{{ k3s_expected_node_names }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Read scheduling state for every expected Node
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, node, "{{ item }}", "--output=jsonpath={.spec.unschedulable}"]
+      loop: "{{ k3s_expected_node_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: k3s_scheduling_state
+      changed_when: false
+
+    - name: Uncordon only expected Nodes that remain disabled
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, uncordon, "{{ item.item }}"]
+      loop: "{{ k3s_scheduling_state.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout | trim == 'true'
+      changed_when: true
+
+    - name: Report cluster recovery
+      ansible.builtin.debug:
+        msg:
+          operation: k3s_power_on
+          nodes: "{{ k3s_expected_node_names }}"
+          api_with_etcd_backend_ready: true
+          nodes_ready: true
+
+    - name: Send optional power-on notification
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') }}"
+          Title: K3s power on completed
+          Priority: default
+          Tags: white_check_mark
+        body: "K3s power on completed for {{ groups.k3s_cluster | join(', ') }}."
+        status_code: 200
+      delegate_to: localhost
+      become: false
+      no_log: true
+      failed_when: false
+      when:
+        - k3s_ntfy_enabled | bool
+        - lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') | length > 0
+        - lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') | length > 0

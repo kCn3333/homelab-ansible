@@ -27,6 +27,7 @@ The repository provides non-mutating audits and explicitly gated APT
 maintenance:
 
 - cluster connectivity;
+- guarded K3s Wake-on-LAN, health reporting, and approved full-cluster shutdown;
 - homelab connectivity;
 - homelab system preflight information;
 - a read-only preview of safe APT updates;
@@ -57,6 +58,17 @@ clean systemd state before restarting the selected host.
 
 No general shutdown, firewall, SSH configuration, cluster installation, or
 unrelated cleanup automation is included.
+
+K3s power operations are deliberately separate from general host maintenance.
+Power On validates the complete private inventory without a limit, sends
+Wake-on-LAN packets from the controller, checks each local Kubernetes API with
+its etcd backend, and uncordons only expected Nodes that remain disabled.
+Health Check is read-only and supports `report` and `strict` policies. Approved
+Shutdown requires the complete cluster plus two explicit confirmations,
+validates workloads before mutation, cordons without draining, and requests
+poweroff for the operational worker-order group before the master-order group.
+Closed SSH ports are observations, not proof of physical power state. See
+[`docs/k3s-power-management.md`](docs/k3s-power-management.md).
 
 ## Optional host onboarding tools
 
