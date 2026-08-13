@@ -48,6 +48,7 @@ jobs:
           esac
           python3 tests/test-send-wol.py
           python3 tests/test-evaluate-k3s-health.py
+          ansible-playbook -i localhost, --connection=local tests/test-ansible-json-item-access.yml
 
       - name: Compile Python helpers
         run: python3 -m compileall -q cluster/scripts scripts tests
