@@ -43,7 +43,7 @@
           - hostvars[item].ansible_host is defined
           - hostvars[item].ansible_host | string | trim | length > 0
           - hostvars[item].mac_address is defined
-          - hostvars[item].mac_address is match('^(?:[0-9A-Fa-f]{2}([:-]))(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}$')
+          - hostvars[item].mac_address is match('^(?:(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2})$')
           - ((hostvars[item].mac_address | regex_replace('[:-]', ''))[0:2] | int(base=16)) % 2 == 0
         fail_msg: Every K3s node requires ansible_host and a unicast MAC.
       loop: "{{ groups.k3s_cluster }}"
