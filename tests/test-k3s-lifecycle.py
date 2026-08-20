@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import unittest
 
 import yaml
@@ -46,6 +47,13 @@ class PowerOnTests(unittest.TestCase):
         self.assertLess(wait, final_gate)
         self.assertFalse(self.plays[0]["tasks"][send]["failed_when"])
         self.assertTrue(self.plays[0]["tasks"][send]["no_log"])
+        gate = self.plays[0]["tasks"][final_gate]["ansible.builtin.assert"]["that"]
+        self.assertIn("selectattr('state', 'equalto', 'started')", "\n".join(gate))
+        self.assertNotIn("selectattr('failed'", "\n".join(gate))
+
+    def test_node_names_use_output_name(self) -> None:
+        self.assertIn('"--output=name"', self.text)
+        self.assertIn("regex_replace', '^node/'", self.text)
 
     def test_no_scheduling_or_extended_audits(self) -> None:
         lowered = self.text.lower()
@@ -90,6 +98,14 @@ class PowerOffTests(unittest.TestCase):
             self.assertNotIn(forbidden, tail)
         self.assertEqual(2, tail.count("systemctl, poweroff, --no-block"))
 
+    def test_storage_and_partial_probe_parsers_are_fail_closed(self) -> None:
+        self.assertIn("--output=custom-columns=STATE:.status.state", self.text)
+        self.assertIn('{"|"}', self.text)
+        self.assertIn('{"\\n"}', self.text)
+        self.assertIn("selectattr('state', 'equalto', 'started')", self.text)
+        self.assertNotIn("selectattr('failed'", self.text)
+        self.assertNotIn("rejectattr('failed'", self.text)
+
 
 class HealthTests(unittest.TestCase):
     @classmethod
@@ -111,6 +127,31 @@ class HealthTests(unittest.TestCase):
         self.assertIn("difference(k3s_live_node_names)", self.text)
         self.assertIn("difference(k3s_expected_node_names)", self.text)
         self.assertNotIn("from_json", self.text)
+
+    def test_probe_node_and_memory_parsers_are_fail_closed(self) -> None:
+        self.assertIn("item.state == 'started'", self.text)
+        self.assertNotIn("item.failed", self.text)
+        self.assertIn("custom-columns=NAME:", self.text)
+        self.assertIn("memory_mb']['nocache']['used", self.text)
+        self.assertNotIn("memfree_mb", self.text)
+
+
+class LifecycleStaticRegressionTests(unittest.TestCase):
+    def test_forbidden_lifecycle_constructs_are_absent(self) -> None:
+        combined = ""
+        for path in (POWER_ON, POWER_OFF, HEALTH):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("{'\\\\n'}", text)
+            combined += text
+        self.assertNotIn("selectattr('failed'", combined)
+        self.assertNotIn("rejectattr('failed'", combined)
+        self.assertNotIn("item.failed", combined)
+        self.assertNotIn("memfree_mb", combined)
+        self.assertNotIn("from_json", combined)
+        self.assertNotIn("ignore_errors", combined)
+        self.assertIsNone(
+            re.search(r"(?m)^\\s+(?:ansible\\.builtin\\.)?(?:shell|raw):", combined)
+        )
 
 
 if __name__ == "__main__":

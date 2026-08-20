@@ -59,21 +59,30 @@
 
     - name: Read Kubernetes Node names
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}"]
+        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=name"]
       register: k3s_shutdown_nodes
       changed_when: false
 
-    - name: Build expected Node names
+    - name: Build expected and live Node names
       ansible.builtin.set_fact:
         k3s_expected_node_names: "{{ groups.k3s_cluster }}"
+        k3s_shutdown_node_names: >-
+          {{ k3s_shutdown_nodes.stdout_lines
+             | map('trim')
+             | reject('equalto', '')
+             | map('regex_replace', '^node/', '')
+             | list }}
 
     - name: Require exact Node membership
       ansible.builtin.assert:
         that:
-          - k3s_expected_node_names | sort == k3s_shutdown_nodes.stdout_lines | sort
+          - k3s_shutdown_node_names | length == 3
+          - k3s_shutdown_node_names | unique | length == 3
+          - k3s_shutdown_node_names | reject('match', '^.+$') | list | length == 0
+          - k3s_expected_node_names | sort == k3s_shutdown_node_names | sort
         fail_msg: >-
-          Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_shutdown_nodes.stdout_lines) }},
-          unexpected={{ k3s_shutdown_nodes.stdout_lines | difference(k3s_expected_node_names) }}.
+          Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_shutdown_node_names) }},
+          unexpected={{ k3s_shutdown_node_names | difference(k3s_expected_node_names) }}.
 
     - name: Require every Node to be Ready
       ansible.builtin.command:
@@ -85,16 +94,47 @@
 
     - name: Read Longhorn backup states
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, backups.longhorn.io, --all-namespaces, "--output=jsonpath={range .items[*]}{.status.state}{'\\n'}{end}"]
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - backups.longhorn.io
+          - --all-namespaces
+          - --no-headers
+          - --output=custom-columns=STATE:.status.state
       register: k3s_longhorn_backup_states
       changed_when: false
       when: k3s_shutdown_check_longhorn | bool
 
     - name: Read Longhorn restore states
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, engines.longhorn.io, --all-namespaces, "--output=jsonpath={range .items[*].status.restoreStatus[*]}{.isRestoring}{'|'}{.error}{'\\n'}{end}"]
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - engines.longhorn.io
+          - --all-namespaces
+          - '--output=jsonpath={range .items[*].status.restoreStatus[*]}{.isRestoring}{"|"}{.error}{"\n"}{end}'
       register: k3s_longhorn_restore_states
       changed_when: false
+      when: k3s_shutdown_check_longhorn | bool
+
+    - name: Validate Longhorn query output
+      ansible.builtin.assert:
+        that:
+          - >-
+            k3s_longhorn_backup_states.stdout | length == 0
+            or (k3s_longhorn_backup_states.stdout_lines | length > 0
+                and k3s_longhorn_backup_states.stdout_lines
+                    | reject('match', '^[A-Za-z][A-Za-z0-9_-]*$')
+                    | list | length == 0)
+          - >-
+            k3s_longhorn_restore_states.stdout | length == 0
+            or (k3s_longhorn_restore_states.stdout_lines | length > 0
+                and k3s_longhorn_restore_states.stdout_lines
+                    | reject('match', '^(true|false)\\|.*$')
+                    | list | length == 0)
+        fail_msg: Unparseable Longhorn output blocks shutdown.
       when: k3s_shutdown_check_longhorn | bool
 
     - name: Require no active backup restore or restore error
@@ -167,9 +207,16 @@
               stage: worker_poweroff
               host: "{{ inventory_hostname }}"
               ssh_responding: >-
-                {{ k3s_partial_probes.results | rejectattr('failed') | map(attribute='item') | list }}
+                {{ k3s_partial_probes.results
+                   | selectattr('state', 'defined')
+                   | selectattr('state', 'equalto', 'started')
+                   | map(attribute='item') | list }}
               ssh_not_responding_or_unreachable_unknown: >-
-                {{ k3s_partial_probes.results | selectattr('failed') | map(attribute='item') | list }}
+                {{ groups.k3s_cluster
+                   | difference(k3s_partial_probes.results
+                                | selectattr('state', 'defined')
+                                | selectattr('state', 'equalto', 'started')
+                                | map(attribute='item') | list) }}
 
         - name: Stop partial worker shutdown
           ansible.builtin.fail:
@@ -228,9 +275,16 @@
               stage: master_poweroff
               host: "{{ inventory_hostname }}"
               ssh_responding: >-
-                {{ k3s_partial_probes.results | rejectattr('failed') | map(attribute='item') | list }}
+                {{ k3s_partial_probes.results
+                   | selectattr('state', 'defined')
+                   | selectattr('state', 'equalto', 'started')
+                   | map(attribute='item') | list }}
               ssh_not_responding_or_unreachable_unknown: >-
-                {{ k3s_partial_probes.results | selectattr('failed') | map(attribute='item') | list }}
+                {{ groups.k3s_cluster
+                   | difference(k3s_partial_probes.results
+                                | selectattr('state', 'defined')
+                                | selectattr('state', 'equalto', 'started')
+                                | map(attribute='item') | list) }}
 
         - name: Stop partial master shutdown
           ansible.builtin.fail:

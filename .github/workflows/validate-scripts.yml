@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ripgrep shellcheck
-          python3 -m pip install --disable-pip-version-check 'ansible-core>=2.18,<2.20'
+          python3 -m pip install --disable-pip-version-check 'ansible-core==2.20.7'
 
       - name: Check Bash syntax
         run: bash -n scripts/*.sh tests/*.sh
@@ -49,6 +49,7 @@ jobs:
           python3 tests/test-send-wol.py
           python3 tests/test-k3s-lifecycle.py
           ansible-playbook -i localhost, --connection=local tests/test-ansible-json-item-access.yml
+          ansible-playbook -i localhost, --connection=local tests/test-k3s-lifecycle-runtime.yml
 
       - name: Compile Python helpers
         run: python3 -m compileall -q cluster/scripts scripts tests
@@ -62,6 +63,7 @@ jobs:
           test -z "$(find cluster/playbooks docs -type f -perm /111 -print -quit)"
           test ! -x .github/workflows/validate-scripts.yml
           test ! -x tests/test-ansible-json-item-access.yml
+          test ! -x tests/test-k3s-lifecycle-runtime.yml
 
       - name: Parse workflow YAML
         run: python3 -c 'import pathlib, yaml; yaml.safe_load(pathlib.Path(".github/workflows/validate-scripts.yml").read_text())'

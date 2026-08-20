@@ -55,7 +55,9 @@
       loop_control:
         label: "{{ item.item }}"
       changed_when: false
-      when: not (item.failed | default(false))
+      when:
+        - item.state is defined
+        - item.state == 'started'
 
 - name: Collect basic host health from reachable servers
   hosts: k3s_health_reachable
@@ -109,6 +111,27 @@
       register: k3s_health_root_df
       changed_when: false
 
+    - name: Validate memory facts
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['memory_mb']['real']['total'] | int > 0
+          - ansible_facts['memory_mb']['nocache']['used'] | int >= 0
+          - >-
+            ansible_facts['memory_mb']['nocache']['used'] | int
+            <= ansible_facts['memory_mb']['real']['total'] | int
+
+    - name: Calculate memory usage without filesystem cache
+      ansible.builtin.set_fact:
+        k3s_health_memory_used_percent: >-
+          {{ (((ansible_facts['memory_mb']['nocache']['used'] | int)
+               / (ansible_facts['memory_mb']['real']['total'] | int)) * 100) | round(1) }}
+
+    - name: Validate calculated memory percentage
+      ansible.builtin.assert:
+        that:
+          - k3s_health_memory_used_percent | float >= 0
+          - k3s_health_memory_used_percent | float <= 100
+
     - name: Store concise host health facts
       ansible.builtin.set_fact:
         k3s_health_host_report:
@@ -121,9 +144,7 @@
                and '[+]etcd ok' in k3s_health_readyz.stdout else 'NOT_READY' }}
           failed_units: "{{ k3s_health_failed_units.stdout_lines | length }}"
           reboot_required: "{{ 'YES' if k3s_health_reboot_marker.stat.exists else 'NO' }}"
-          memory_used_percent: >-
-            {{ (((ansible_facts['memtotal_mb'] - ansible_facts['memfree_mb'])
-                 / ansible_facts['memtotal_mb']) * 100) | round(1) }}
+          memory_used_percent: "{{ k3s_health_memory_used_percent }}"
           root_used_percent: "{{ k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int }}"
         k3s_health_host_critical: >-
           {{ k3s_health_service.stdout | trim != 'active'
@@ -133,8 +154,7 @@
         k3s_health_host_warning: >-
           {{ k3s_health_failed_units.stdout_lines | length > 0
              or k3s_health_reboot_marker.stat.exists
-             or (((ansible_facts['memtotal_mb'] - ansible_facts['memfree_mb'])
-                  / ansible_facts['memtotal_mb']) * 100) >= k3s_health_memory_warning_percent
+             or k3s_health_memory_used_percent | float >= k3s_health_memory_warning_percent
              or (k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int)
                 >= k3s_health_root_warning_percent }}
 
@@ -147,19 +167,43 @@
   tasks:
     - name: Read Node names and Ready conditions
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=jsonpath={range .items[*]}{.metadata.name}{'|'}{range .status.conditions[?(@.type=='Ready')]}{.status}{end}{'\\n'}{end}"]
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - nodes
+          - --no-headers
+          - '--output=custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status'
       register: k3s_health_node_rows
       changed_when: false
+
+    - name: Validate Node rows before parsing
+      ansible.builtin.assert:
+        that:
+          - k3s_health_node_rows.stdout | trim | length > 0
+          - k3s_health_node_rows.stdout_lines | length > 0
+          - k3s_health_node_rows.stdout_lines | select('equalto', '') | list | length == 0
+          - >-
+            k3s_health_node_rows.stdout_lines
+            | reject('match', '^\\S+\\s+(True|False|Unknown)$')
+            | list | length == 0
 
     - name: Store parsed Node rows
       ansible.builtin.set_fact:
         k3s_health_live_node_names: >-
           {{ k3s_health_node_rows.stdout_lines
-             | map('regex_replace', '\\|.*$', '') | list }}
+             | map('regex_replace', '\\s+.*$', '') | list }}
         k3s_health_not_ready_nodes: >-
           {{ k3s_health_node_rows.stdout_lines
-             | reject('search', '\\|True$')
-             | map('regex_replace', '\\|.*$', '') | list }}
+             | reject('match', '^\\S+\\s+True$')
+             | map('regex_replace', '\\s+.*$', '') | list }}
+
+    - name: Require unique nonempty Node names
+      ansible.builtin.assert:
+        that:
+          - k3s_health_live_node_names | length > 0
+          - k3s_health_live_node_names | unique | length == k3s_health_live_node_names | length
+          - k3s_health_live_node_names | reject('match', '^.+$') | list | length == 0
 
 - name: Report and enforce basic health policy
   hosts: localhost

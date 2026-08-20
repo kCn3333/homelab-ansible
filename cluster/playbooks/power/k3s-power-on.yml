@@ -103,7 +103,11 @@
       ansible.builtin.assert:
         that:
           - k3s_wol_results.results | rejectattr('rc', 'equalto', 0) | list | length == 0
-          - k3s_ssh_results.results | selectattr('failed', 'defined') | selectattr('failed') | list | length == 0
+          - >-
+            k3s_ssh_results.results
+            | selectattr('state', 'defined')
+            | selectattr('state', 'equalto', 'started')
+            | list | length == groups.k3s_cluster | length
         fail_msg: At least one Wake-on-LAN send failed or one host did not return.
 
 - name: Verify every recovered K3s server
@@ -150,21 +154,30 @@
   tasks:
     - name: Read Kubernetes Node names
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}"]
+        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=name"]
       register: k3s_live_nodes
       changed_when: false
 
-    - name: Build expected Node names
+    - name: Build expected and live Node names
       ansible.builtin.set_fact:
         k3s_expected_node_names: "{{ groups.k3s_cluster }}"
+        k3s_live_node_names: >-
+          {{ k3s_live_nodes.stdout_lines
+             | map('trim')
+             | reject('equalto', '')
+             | map('regex_replace', '^node/', '')
+             | list }}
 
     - name: Require exact Node membership
       ansible.builtin.assert:
         that:
-          - k3s_expected_node_names | sort == k3s_live_nodes.stdout_lines | sort
+          - k3s_live_node_names | length == 3
+          - k3s_live_node_names | unique | length == 3
+          - k3s_live_node_names | reject('match', '^.+$') | list | length == 0
+          - k3s_expected_node_names | sort == k3s_live_node_names | sort
         fail_msg: >-
-          Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_live_nodes.stdout_lines) }},
-          unexpected={{ k3s_live_nodes.stdout_lines | difference(k3s_expected_node_names) }}.
+          Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_live_node_names) }},
+          unexpected={{ k3s_live_node_names | difference(k3s_expected_node_names) }}.
 
     - name: Require every Node to be Ready
       ansible.builtin.command:
