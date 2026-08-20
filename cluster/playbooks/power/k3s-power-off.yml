@@ -1,372 +1,118 @@
 ---
-- name: Run immutable shutdown safety gates on every K3s server
+- name: Validate shutdown approval inventory and every K3s server
   hosts: k3s_cluster
   gather_facts: false
-  become: true
+  become: false
   any_errors_fatal: true
-  vars:
-    k3s_binary_path: /usr/local/bin/k3s
-    k3s_service_name: k3s
   tasks:
-    - name: Require explicit full-cluster approval and inventory topology
+    - name: Require both confirmations and the complete inventory
       ansible.builtin.assert:
         that:
           - k3s_power_action | default('') == 'shutdown'
           - k3s_shutdown_confirm | default('') == 'SHUTDOWN_K3S_CLUSTER'
+          - ansible_limit is not defined or ansible_limit | trim | length == 0
           - "'masters' in groups"
           - "'workers' in groups"
           - "'k3s_cluster' in groups"
           - groups.masters | length == 1
-          - groups.workers | length >= 1
+          - groups.workers | length == 2
+          - groups.k3s_cluster | length == 3
           - groups.masters | intersect(groups.workers) | length == 0
-          - groups.k3s_cluster | sort == (groups.masters + groups.workers) | unique | sort
-          - ansible_play_hosts_all | sort == groups.k3s_cluster | sort
-          - ansible_limit is not defined or ansible_limit | trim | length == 0
-        fail_msg: Full-cluster scope without --limit and both confirmations are mandatory.
+          - groups.k3s_cluster | sort == (groups.masters + groups.workers) | sort
+        fail_msg: Approved Shutdown requires both confirmations, all three hosts, and no --limit.
       run_once: true
       delegate_to: localhost
-      become: false
 
-    - name: Require a nonempty Kubernetes Node name
-      ansible.builtin.assert:
-        that:
-          - k3s_node_name | default(inventory_hostname) | string | trim | length > 0
+    - name: Verify Ansible connectivity
+      ansible.builtin.ping:
 
-    - name: Inspect the configured K3s binary
-      ansible.builtin.stat:
-        path: "{{ k3s_binary_path }}"
-        follow: false
-      register: k3s_shutdown_binary
-
-    - name: Require a regular executable K3s binary
-      ansible.builtin.assert:
-        that:
-          - k3s_shutdown_binary.stat.exists | default(false)
-          - k3s_shutdown_binary.stat.isreg | default(false)
-          - not (k3s_shutdown_binary.stat.islnk | default(false))
-          - k3s_shutdown_binary.stat.executable | default(false)
-
-    - name: Check the K3s server service
+    - name: Verify noninteractive sudo
       ansible.builtin.command:
-        argv: [systemctl, is-active, "{{ k3s_service_name }}"]
-      register: k3s_shutdown_service
+        argv: ["true"]
+      become: true
       changed_when: false
 
-    - name: Read failed systemd units
+    - name: Require active K3s service
       ansible.builtin.command:
-        argv: [systemctl, --failed, --no-legend, --plain, --no-pager]
-      register: k3s_shutdown_failed_units
+        argv: [systemctl, is-active, k3s]
+      become: true
       changed_when: false
 
-    - name: Require healthy K3s and systemd state
-      ansible.builtin.assert:
-        that:
-          - k3s_shutdown_service.stdout | trim == 'active'
-          - k3s_shutdown_failed_units.stdout_lines | length == 0
-
-    - name: Require local API readiness with etcd backend check
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
-      register: k3s_shutdown_local_readyz
-      changed_when: false
-
-    - name: Validate the local API backend result
-      ansible.builtin.assert:
-        that:
-          - k3s_shutdown_local_readyz.rc == 0
-          - "'readyz check passed' in k3s_shutdown_local_readyz.stdout"
-          - "'[+]etcd ok' in k3s_shutdown_local_readyz.stdout"
-
-- name: Complete fail-closed cluster preflight before mutation
+- name: Complete all Kubernetes and storage checks before poweroff
   hosts: masters
   gather_facts: false
   become: true
   any_errors_fatal: true
   vars:
     k3s_binary_path: /usr/local/bin/k3s
-    k3s_resource_timeout: 30s
-    k3s_pod_pending_grace_seconds: 300
-    k3s_health_expect_flux: true
-    k3s_health_expect_longhorn: true
-    k3s_health_expect_cnpg: true
+    k3s_shutdown_check_longhorn: true
   tasks:
-    - name: Build expected Kubernetes Node names
-      ansible.builtin.set_fact:
-        k3s_expected_node_names: >-
-          {%- set result = [] -%}
-          {%- for host in groups.k3s_cluster -%}
-          {%- set _ = result.append(hostvars[host].k3s_node_name | default(host)) -%}
-          {%- endfor -%}
-          {{ result }}
-
-    - name: Require unique expected Kubernetes Node names
-      ansible.builtin.assert:
-        that:
-          - k3s_expected_node_names | unique | length == groups.k3s_cluster | length
-
-    - name: Read Kubernetes Nodes
+    - name: Require local API and etcd readiness
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=json"]
-      register: k3s_preflight_nodes_raw
+        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
+      register: k3s_shutdown_readyz
+      changed_when: false
+      failed_when: >-
+        k3s_shutdown_readyz.rc != 0
+        or 'readyz check passed' not in k3s_shutdown_readyz.stdout
+        or '[+]etcd ok' not in k3s_shutdown_readyz.stdout
+
+    - name: Read Kubernetes Node names
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}"]
+      register: k3s_shutdown_nodes
       changed_when: false
 
-    - name: Parse live Node names
+    - name: Build expected Node names
       ansible.builtin.set_fact:
-        k3s_live_node_names: "{{ (k3s_preflight_nodes_raw.stdout | from_json)['items'] | map(attribute='metadata.name') | list }}"
+        k3s_expected_node_names: "{{ groups.k3s_cluster }}"
 
     - name: Require exact Node membership
       ansible.builtin.assert:
         that:
-          - k3s_expected_node_names | sort == k3s_live_node_names | sort
+          - k3s_expected_node_names | sort == k3s_shutdown_nodes.stdout_lines | sort
         fail_msg: >-
-          Node membership mismatch; missing={{ k3s_expected_node_names | difference(k3s_live_node_names) }},
-          unexpected={{ k3s_live_node_names | difference(k3s_expected_node_names) }}.
+          Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_shutdown_nodes.stdout_lines) }},
+          unexpected={{ k3s_shutdown_nodes.stdout_lines | difference(k3s_expected_node_names) }}.
 
-    - name: Require every expected Node to be Ready
+    - name: Require every Node to be Ready
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, wait, "--for=condition=Ready", "node/{{ item }}", "--timeout={{ k3s_resource_timeout }}"]
+        argv: ["{{ k3s_binary_path }}", kubectl, wait, "--for=condition=Ready", "node/{{ item }}", "--timeout=30s"]
       loop: "{{ k3s_expected_node_names }}"
       loop_control:
         label: "{{ item }}"
       changed_when: false
 
-    - name: Read pod and Job status data
+    - name: Read Longhorn backup states
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
-      loop: [pods, jobs]
-      register: k3s_preflight_pods_raw
+        argv: ["{{ k3s_binary_path }}", kubectl, get, backups.longhorn.io, --all-namespaces, "--output=jsonpath={range .items[*]}{.status.state}{'\\n'}{end}"]
+      register: k3s_longhorn_backup_states
       changed_when: false
+      when: k3s_shutdown_check_longhorn | bool
 
-    - name: Classify current pod state locally
+    - name: Read Longhorn restore states
       ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - "{{ playbook_dir }}/../../scripts/evaluate-k3s-health.py"
-          - pods
-          - --pending-grace-seconds
-          - "{{ k3s_pod_pending_grace_seconds | string }}"
-        stdin: >-
-          {{ {'pods': k3s_preflight_pods_raw.results[0].stdout | from_json,
-              'jobs': k3s_preflight_pods_raw.results[1].stdout | from_json} | to_json }}
-      delegate_to: localhost
-      become: false
-      register: k3s_preflight_pod_evaluation_raw
+        argv: ["{{ k3s_binary_path }}", kubectl, get, engines.longhorn.io, --all-namespaces, "--output=jsonpath={range .items[*].status.restoreStatus[*]}{.isRestoring}{'|'}{.error}{'\\n'}{end}"]
+      register: k3s_longhorn_restore_states
       changed_when: false
+      when: k3s_shutdown_check_longhorn | bool
 
-    - name: Require no current pod failures or transition warnings
+    - name: Require no active backup restore or restore error
       ansible.builtin.assert:
         that:
-          - (k3s_preflight_pod_evaluation_raw.stdout | from_json).critical | length == 0
-          - (k3s_preflight_pod_evaluation_raw.stdout | from_json).warnings | length == 0
-        fail_msg: Current pod failures or transitions block shutdown.
+          - k3s_longhorn_backup_states.stdout_lines | intersect(['New', 'Pending', 'InProgress']) | length == 0
+          - k3s_longhorn_restore_states.stdout_lines | select('match', '^true\\|') | list | length == 0
+          - k3s_longhorn_restore_states.stdout_lines | reject('match', '^(false)?\\|$') | list | length == 0
+        fail_msg: An active Longhorn backup, restore, or restore error blocks shutdown.
+      when: k3s_shutdown_check_longhorn | bool
 
-    - name: Read expected Flux resources
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
-      loop:
-        - gitrepositories.source.toolkit.fluxcd.io
-        - kustomizations.kustomize.toolkit.fluxcd.io
-        - helmreleases.helm.toolkit.fluxcd.io
-      register: k3s_preflight_flux_raw
-      changed_when: false
-      when: k3s_health_expect_flux | bool
-
-    - name: Read expected Longhorn resource kinds
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "{{ item }}", --all-namespaces, "--output=json"]
-      loop:
-        - backuptargets.longhorn.io
-        - volumes.longhorn.io
-        - backups.longhorn.io
-        - engines.longhorn.io
-      register: k3s_preflight_longhorn_raw
-      changed_when: false
-      when: k3s_health_expect_longhorn | bool
-
-    - name: Parse expected Longhorn resources
-      ansible.builtin.set_fact:
-        k3s_preflight_backup_targets: "{{ (k3s_preflight_longhorn_raw.results[0].stdout | from_json)['items'] }}"
-        k3s_preflight_volumes: "{{ (k3s_preflight_longhorn_raw.results[1].stdout | from_json)['items'] }}"
-        k3s_preflight_backups: "{{ (k3s_preflight_longhorn_raw.results[2].stdout | from_json)['items'] }}"
-        k3s_preflight_engines: "{{ (k3s_preflight_longhorn_raw.results[3].stdout | from_json)['items'] }}"
-      when: k3s_health_expect_longhorn | bool
-
-    - name: Read expected CloudNativePG clusters
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, clusters.postgresql.cnpg.io, --all-namespaces, "--output=json"]
-      register: k3s_preflight_cnpg_raw
-      changed_when: false
-      when: k3s_health_expect_cnpg | bool
-
-    - name: Classify all expected integration state locally
-      ansible.builtin.command:
-        argv: ["{{ ansible_playbook_python }}", "{{ playbook_dir }}/../../scripts/evaluate-k3s-health.py", integrations]
-        stdin: >-
-          {% set result = {'expect': {'flux': k3s_health_expect_flux | bool,
-                                      'longhorn': k3s_health_expect_longhorn | bool,
-                                      'cnpg': k3s_health_expect_cnpg | bool}} %}
-          {% set _ = result.update({'flux_git_repositories': (k3s_preflight_flux_raw.results[0].stdout | from_json)['items'],
-                                    'flux_kustomizations': (k3s_preflight_flux_raw.results[1].stdout | from_json)['items'],
-                                    'flux_helm_releases': (k3s_preflight_flux_raw.results[2].stdout | from_json)['items']}) if k3s_health_expect_flux | bool else none %}
-          {% set _ = result.update({'longhorn_backup_targets': k3s_preflight_backup_targets,
-                                    'longhorn_volumes': k3s_preflight_volumes,
-                                    'longhorn_backups': k3s_preflight_backups,
-                                    'longhorn_engines': k3s_preflight_engines}) if k3s_health_expect_longhorn | bool else none %}
-          {% set _ = result.update({'cnpg_clusters': (k3s_preflight_cnpg_raw.stdout | from_json)['items']}) if k3s_health_expect_cnpg | bool else none %}
-          {{ result | to_json }}
-      delegate_to: localhost
-      become: false
-      register: k3s_preflight_integrations_raw
-      changed_when: false
-
-    - name: Require the shared integration classifier to report no critical state
-      ansible.builtin.assert:
-        that:
-          - (k3s_preflight_integrations_raw.stdout | from_json).critical | length == 0
-
-    - name: Report integration preflight scope
+    - name: Report skipped Longhorn storage gate
       ansible.builtin.debug:
-        msg:
-          flux: "{{ 'CHECKED' if k3s_health_expect_flux | bool else 'NOT_CHECKED' }}"
-          longhorn: "{{ 'CHECKED' if k3s_health_expect_longhorn | bool else 'NOT_CHECKED' }}"
-          cnpg: "{{ 'CHECKED' if k3s_health_expect_cnpg | bool else 'NOT_CHECKED' }}"
+        msg: "Longhorn storage safety: NOT_CHECKED"
+      when: not (k3s_shutdown_check_longhorn | bool)
 
-- name: Reconfirm all managed hosts after read-only preflight
-  hosts: k3s_cluster
-  gather_facts: false
-  become: false
-  any_errors_fatal: true
-  tasks:
-    - name: Reconfirm managed connectivity
-      ansible.builtin.ping:
-
-- name: Cordon schedulable Nodes with rollback before poweroff
-  hosts: masters
-  gather_facts: false
-  become: true
-  any_errors_fatal: true
-  vars:
-    k3s_binary_path: /usr/local/bin/k3s
-  tasks:
-    - name: Execute reversible scheduling changes
-      block:
-        - name: Build expected Kubernetes Node names
-          ansible.builtin.set_fact:
-            k3s_expected_node_names: >-
-              {%- set result = [] -%}
-              {%- for host in groups.k3s_cluster -%}
-              {%- set _ = result.append(hostvars[host].k3s_node_name | default(host)) -%}
-              {%- endfor -%}
-              {{ result }}
-
-        - name: Read initial schedulability
-          ansible.builtin.command:
-            argv: ["{{ k3s_binary_path }}", kubectl, get, node, "{{ item }}", "--output=jsonpath={.spec.unschedulable}"]
-          loop: "{{ k3s_expected_node_names }}"
-          loop_control:
-            label: "{{ item }}"
-          register: k3s_before_cordon
-          changed_when: false
-
-        - name: Select Nodes requiring a new cordon
-          ansible.builtin.set_fact:
-            k3s_nodes_to_cordon: "{{ k3s_before_cordon.results | rejectattr('stdout', 'equalto', 'true') | map(attribute='item') | list }}"
-
-        - name: Attempt cordon on each previously schedulable Node
-          ansible.builtin.command:
-            argv: ["{{ k3s_binary_path }}", kubectl, cordon, "{{ item }}"]
-          loop: "{{ k3s_nodes_to_cordon }}"
-          loop_control:
-            label: "{{ item }}"
-          register: k3s_cordon_attempts
-          changed_when: k3s_cordon_attempts.rc | default(1) == 0
-          failed_when: false
-
-        - name: Record only confirmed successful cordons
-          ansible.builtin.set_fact:
-            k3s_cordoned_by_this_run: "{{ k3s_cordon_attempts.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
-
-        - name: Fail when any requested cordon failed
-          ansible.builtin.assert:
-            that:
-              - k3s_cordoned_by_this_run | length == k3s_nodes_to_cordon | length
-            fail_msg: One or more cordon operations failed.
-
-        - name: Verify every expected Node is cordoned
-          ansible.builtin.command:
-            argv: ["{{ k3s_binary_path }}", kubectl, get, node, "{{ item }}", "--output=jsonpath={.spec.unschedulable}"]
-          loop: "{{ k3s_expected_node_names }}"
-          loop_control:
-            label: "{{ item }}"
-          register: k3s_after_cordon
-          changed_when: false
-
-        - name: Require confirmed cordon state on every expected Node
-          ansible.builtin.assert:
-            that:
-              - k3s_after_cordon.results | rejectattr('stdout', 'equalto', 'true') | list | length == 0
-
-        - name: Perform the final Kubernetes API check before poweroff boundary
-          ansible.builtin.command:
-            argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
-          register: k3s_final_readyz
-          changed_when: false
-
-        - name: Require final API readiness with etcd backend check
-          ansible.builtin.assert:
-            that:
-              - k3s_final_readyz.rc == 0
-              - "'readyz check passed' in k3s_final_readyz.stdout"
-              - "'[+]etcd ok' in k3s_final_readyz.stdout"
-
-      rescue:
-        - name: Preserve the primary scheduling failure summary
-          ansible.builtin.set_fact:
-            k3s_primary_failure:
-              task: "{{ ansible_failed_task.name | default('unknown') }}"
-              message: "{{ ansible_failed_result.msg | default('scheduling gate failed') }}"
-
-        - name: Roll back only Nodes successfully cordoned by this run
-          ansible.builtin.command:
-            argv: ["{{ k3s_binary_path }}", kubectl, uncordon, "{{ item }}"]
-          loop: "{{ k3s_cordoned_by_this_run | default([]) }}"
-          loop_control:
-            label: "{{ item }}"
-          register: k3s_cordon_rollback
-          changed_when: k3s_cordon_rollback.rc | default(1) == 0
-          failed_when: false
-
-        - name: Report primary failure and rollback failures
-          ansible.builtin.debug:
-            msg:
-              primary_failure: "{{ k3s_primary_failure }}"
-              rollback_attempted: "{{ k3s_cordoned_by_this_run | default([]) }}"
-              rollback_failures: >-
-                {{ k3s_cordon_rollback.results | default([])
-                   | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}
-
-        - name: Stop before the irreversible poweroff boundary
-          ansible.builtin.fail:
-            msg: >-
-              Scheduling preparation failed at {{ k3s_primary_failure.task }};
-              rollback failures={{ k3s_cordon_rollback.results | default([])
-              | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}.
-
-# No Kubernetes, etcd, Flux, Longhorn, CNPG, or uncordon task is permitted below.
-- name: Initialize the durable worker poweroff gate locally
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  tasks:
-    - name: Reset every worker result to boolean false
-      ansible.builtin.set_fact:
-        k3s_worker_power_results: >-
-          {%- set result = {} -%}
-          {%- for worker in groups.workers -%}{%- set _ = result.update({worker: false}) -%}{%- endfor -%}
-          {{ result }}
-
-- name: Request poweroff of worker-order hosts sequentially
+# Safety boundary: after this point no Kubernetes API command is permitted.
+- name: Power off workers sequentially
   hosts: workers
   gather_facts: false
   become: true
@@ -376,20 +122,14 @@
   vars:
     k3s_poweroff_wait_timeout: 180
   tasks:
-    - name: Request poweroff and observe SSH
+    - name: Request worker poweroff and require SSH closure
       block:
-        - name: Start controlled system poweroff
+        - name: Request nonblocking system poweroff
           ansible.builtin.command:
-            argv: [systemctl, poweroff]
-          async: 10
-          poll: 0
+            argv: [systemctl, poweroff, --no-block]
           changed_when: true
 
-        - name: Record accepted poweroff request
-          ansible.builtin.set_fact:
-            k3s_power_state: POWER_OFF_REQUESTED
-
-        - name: Wait locally for SSH to stop responding
+        - name: Wait locally until SSH stops responding
           ansible.builtin.wait_for:
             host: "{{ ansible_host }}"
             port: "{{ ansible_port | default(22) }}"
@@ -400,25 +140,15 @@
           delegate_to: localhost
           become: false
 
-        - name: Report observed worker-order state
+        - name: Report worker observation
           ansible.builtin.debug:
             msg:
+              stage: worker_poweroff
               host: "{{ inventory_hostname }}"
-              request: POWER_OFF_REQUESTED
               observation: SSH_NOT_RESPONDING
-              physical_power_confirmed: false
-
-        - name: Mark this worker successful in the controller gate
-          ansible.builtin.set_fact:
-            k3s_worker_power_results: >-
-              {{ hostvars.localhost.k3s_worker_power_results
-                 | combine({inventory_hostname: true}) }}
-          delegate_to: localhost
-          delegate_facts: true
-          become: false
 
       rescue:
-        - name: Probe every inventory SSH port after partial shutdown failure
+        - name: Probe inventory SSH endpoints after partial worker failure
           ansible.builtin.wait_for:
             host: "{{ hostvars[item].ansible_host }}"
             port: "{{ hostvars[item].ansible_port | default(22) }}"
@@ -426,63 +156,41 @@
             connect_timeout: 1
             timeout: 1
           loop: "{{ groups.k3s_cluster }}"
-          loop_control:
-            label: "{{ item }}"
+          register: k3s_partial_probes
           delegate_to: localhost
           become: false
-          register: k3s_partial_worker_probes
           failed_when: false
 
-        - name: Report partial worker-order shutdown
+        - name: Report partial worker shutdown
           ansible.builtin.debug:
             msg:
-              failed_phase: worker_poweroff
-              failed_host: "{{ inventory_hostname }}"
-              failed_host_request: "{{ k3s_power_state | default('POWER_OFF_REQUEST_FAILED') }}"
-              node_observations: >-
-                {{ dict(k3s_partial_worker_probes.results | map(attribute='item')
-                        | zip(k3s_partial_worker_probes.results | map(attribute='failed')
-                        | map('ternary', 'POWER_OFF_NOT_CONFIRMED', 'SSH_RESPONDING'))) }}
+              stage: worker_poweroff
+              host: "{{ inventory_hostname }}"
+              ssh_responding: >-
+                {{ k3s_partial_probes.results | rejectattr('failed') | map(attribute='item') | list }}
+              ssh_not_responding_or_unreachable_unknown: >-
+                {{ k3s_partial_probes.results | selectattr('failed') | map(attribute='item') | list }}
 
-        - name: Fail without API rollback after poweroff began
+        - name: Stop partial worker shutdown
           ansible.builtin.fail:
-            msg: Partial shutdown detected after the irreversible poweroff boundary.
+            msg: Partial shutdown stopped before the next host.
 
-- name: Request poweroff of the master-order host last
+- name: Power off the master last
   hosts: masters
   gather_facts: false
   become: true
   any_errors_fatal: true
   vars:
     k3s_poweroff_wait_timeout: 180
-    k3s_ntfy_enabled: false
   tasks:
-    - name: Require every expected worker to have completed safely
-      ansible.builtin.assert:
-        that:
-          - hostvars.localhost.k3s_worker_power_results is defined
-          - hostvars.localhost.k3s_worker_power_results is mapping
-          - hostvars.localhost.k3s_worker_power_results.keys() | list | sort == groups.workers | sort
-          - hostvars.localhost.k3s_worker_power_results.values() | select('sameas', true) | list | length == groups.workers | length
-        fail_msg: Master poweroff is blocked because the complete worker gate is not true.
-      run_once: true
-      delegate_to: localhost
-      become: false
-
-    - name: Request final poweroff and observe SSH
+    - name: Request master poweroff and require SSH closure
       block:
-        - name: Start final controlled system poweroff
+        - name: Request nonblocking system poweroff
           ansible.builtin.command:
-            argv: [systemctl, poweroff]
-          async: 10
-          poll: 0
+            argv: [systemctl, poweroff, --no-block]
           changed_when: true
 
-        - name: Record accepted final poweroff request
-          ansible.builtin.set_fact:
-            k3s_power_state: POWER_OFF_REQUESTED
-
-        - name: Wait locally for final SSH to stop responding
+        - name: Wait locally until SSH stops responding
           ansible.builtin.wait_for:
             host: "{{ ansible_host }}"
             port: "{{ ansible_port | default(22) }}"
@@ -493,28 +201,15 @@
           delegate_to: localhost
           become: false
 
-        - name: Confirm all SSH ports no longer respond
-          ansible.builtin.wait_for:
-            host: "{{ hostvars[item].ansible_host }}"
-            port: "{{ hostvars[item].ansible_port | default(22) }}"
-            state: stopped
-            connect_timeout: 2
-            timeout: 5
-          loop: "{{ groups.k3s_cluster }}"
-          loop_control:
-            label: "{{ item }}"
-          delegate_to: localhost
-          become: false
-
-        - name: Report successful request and TCP observation
+        - name: Report final observation
           ansible.builtin.debug:
             msg:
-              operation: k3s_shutdown
-              result: Poweroff was requested for every host and SSH stopped responding.
-              physical_power_confirmed: false
+              stage: master_poweroff
+              host: "{{ inventory_hostname }}"
+              observation: SSH_NOT_RESPONDING
 
       rescue:
-        - name: Probe every inventory SSH port after final failure
+        - name: Probe inventory SSH endpoints after partial master failure
           ansible.builtin.wait_for:
             host: "{{ hostvars[item].ansible_host }}"
             port: "{{ hostvars[item].ansible_port | default(22) }}"
@@ -522,44 +217,21 @@
             connect_timeout: 1
             timeout: 1
           loop: "{{ groups.k3s_cluster }}"
-          loop_control:
-            label: "{{ item }}"
+          register: k3s_partial_probes
           delegate_to: localhost
           become: false
-          register: k3s_partial_master_probes
           failed_when: false
 
         - name: Report partial final shutdown
           ansible.builtin.debug:
             msg:
-              failed_phase: master_poweroff
-              failed_host: "{{ inventory_hostname }}"
-              failed_host_request: "{{ k3s_power_state | default('POWER_OFF_REQUEST_FAILED') }}"
-              node_observations: >-
-                {{ dict(k3s_partial_master_probes.results | map(attribute='item')
-                        | zip(k3s_partial_master_probes.results | map(attribute='failed')
-                        | map('ternary', 'POWER_OFF_NOT_CONFIRMED', 'SSH_RESPONDING'))) }}
+              stage: master_poweroff
+              host: "{{ inventory_hostname }}"
+              ssh_responding: >-
+                {{ k3s_partial_probes.results | rejectattr('failed') | map(attribute='item') | list }}
+              ssh_not_responding_or_unreachable_unknown: >-
+                {{ k3s_partial_probes.results | selectattr('failed') | map(attribute='item') | list }}
 
-        - name: Fail without API rollback after final poweroff began
+        - name: Stop partial master shutdown
           ansible.builtin.fail:
-            msg: Partial final shutdown detected after the irreversible boundary.
-
-    - name: Send optional shutdown notification
-      ansible.builtin.uri:
-        url: "{{ lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') }}"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') }}"
-          Title: K3s shutdown requests completed
-          Priority: default
-          Tags: white_check_mark
-        body: K3s poweroff was requested for all inventory hosts and SSH stopped responding.
-        status_code: 200
-      delegate_to: localhost
-      become: false
-      no_log: true
-      failed_when: false
-      when:
-        - k3s_ntfy_enabled | bool
-        - lookup('ansible.builtin.env', 'K3S_NTFY_URL', default='') | length > 0
-        - lookup('ansible.builtin.env', 'K3S_NTFY_TOKEN', default='') | length > 0
+            msg: Partial final shutdown requires manual verification.

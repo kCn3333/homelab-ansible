@@ -61,12 +61,12 @@ unrelated cleanup automation is included.
 
 K3s power operations are deliberately separate from general host maintenance.
 Power On validates the complete private inventory without a limit, sends
-Wake-on-LAN packets from the controller, checks each local Kubernetes API with
-its etcd backend, and uncordons only expected Nodes that remain disabled.
+Wake-on-LAN packets from the controller, then checks each local Kubernetes API,
+its etcd backend, and the exact Ready Node set without changing scheduling.
 Health Check is read-only and supports `report` and `strict` policies. Approved
 Shutdown requires the complete cluster plus two explicit confirmations,
-validates workloads before mutation, cordons without draining, and requests
-poweroff for the operational worker-order group before the master-order group.
+checks Ready Nodes and active Longhorn backup/restore safety without cordon or
+drain, then requests poweroff for the worker-order group before the master.
 Closed SSH ports are observations, not proof of physical power state. See
 [`docs/k3s-power-management.md`](docs/k3s-power-management.md).
 
