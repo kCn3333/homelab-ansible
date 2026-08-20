@@ -1,0 +1,207 @@
+---
+- name: Verify K3s lifecycle runtime result handling
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    expected_nodes: [master, worker1, worker2]
+    all_started_probes:
+      - {item: master, state: started, failed: false}
+      - {item: worker1, state: started, failed: false}
+      - {item: worker2, state: started, failed: false}
+    timeout_probes:
+      - {item: master, state: started, failed: false}
+      - {item: worker1, failed: false, msg: timeout}
+      - {item: worker2, state: started, failed: false}
+    partial_shutdown_probes:
+      - {item: master, state: started, failed: false}
+      - {item: worker1, failed: false, msg: timeout}
+      - {item: worker2, state: started, failed: false}
+    valid_node_rows:
+      - master True
+      - worker1 True
+      - worker2 True
+    one_not_ready_rows:
+      - master True
+      - worker1 True
+      - worker2 False
+    duplicate_node_rows:
+      - master True
+      - worker1 True
+      - worker1 True
+    empty_line_node_rows:
+      - master True
+      - ''
+      - worker2 True
+    malformed_node_rows:
+      - master
+      - worker1 True
+      - worker2 True
+    missing_node_rows:
+      - master True
+      - worker1 True
+    additional_node_rows:
+      - master True
+      - worker1 True
+      - worker2 True
+      - extra True
+    memory_mb_fixture:
+      real:
+        total: 16000
+      nocache:
+        used: 4000
+        free: 12000
+      free: 100
+    longhorn_no_resources:
+      rc: 0
+      stdout: ''
+      stdout_lines: []
+    longhorn_query_failure:
+      rc: 1
+      stdout: ''
+      stdout_lines: []
+    longhorn_unparseable:
+      rc: 0
+      stdout: invalid state
+      stdout_lines: [invalid state]
+    longhorn_active_backup:
+      rc: 0
+      stdout: InProgress
+      stdout_lines: [InProgress]
+    longhorn_active_restore:
+      rc: 0
+      stdout: 'true|'
+      stdout_lines: ['true|']
+    longhorn_restore_error:
+      rc: 0
+      stdout: 'false|restore failed'
+      stdout_lines: ['false|restore failed']
+  tasks:
+    - name: Classify successful and timed out probes by state
+      ansible.builtin.set_fact:
+        all_reachable: >-
+          {{ all_started_probes
+             | selectattr('state', 'defined')
+             | selectattr('state', 'equalto', 'started')
+             | map(attribute='item') | list }}
+        timeout_reachable: >-
+          {{ timeout_probes
+             | selectattr('state', 'defined')
+             | selectattr('state', 'equalto', 'started')
+             | map(attribute='item') | list }}
+        timeout_unreachable: >-
+          {{ expected_nodes
+             | difference(timeout_probes
+                          | selectattr('state', 'defined')
+                          | selectattr('state', 'equalto', 'started')
+                          | map(attribute='item') | list) }}
+        partial_shutdown_responding: >-
+          {{ partial_shutdown_probes
+             | selectattr('state', 'defined')
+             | selectattr('state', 'equalto', 'started')
+             | map(attribute='item') | list }}
+        partial_shutdown_unknown: >-
+          {{ expected_nodes
+             | difference(partial_shutdown_probes
+                          | selectattr('state', 'defined')
+                          | selectattr('state', 'equalto', 'started')
+                          | map(attribute='item') | list) }}
+
+    - name: Require state based probe classification
+      ansible.builtin.assert:
+        that:
+          - all_reachable | type_debug == 'list'
+          - all_reachable == expected_nodes
+          - timeout_reachable == ['master', 'worker2']
+          - timeout_unreachable == ['worker1']
+          - timeout_reachable | length != expected_nodes | length
+          - partial_shutdown_responding == ['master', 'worker2']
+          - partial_shutdown_unknown == ['worker1']
+
+    - name: Parse valid Node rows
+      ansible.builtin.set_fact:
+        parsed_node_names: >-
+          {{ valid_node_rows | map('regex_replace', '\s+.*$', '') | list }}
+        parsed_not_ready_nodes: >-
+          {{ one_not_ready_rows
+             | reject('match', '^\S+\s+True$')
+             | map('regex_replace', '\s+.*$', '') | list }}
+        valid_rows_accepted: >-
+          {{ valid_node_rows | length > 0
+             and valid_node_rows | select('equalto', '') | list | length == 0
+             and valid_node_rows
+                 | reject('match', '^\S+\s+(True|False|Unknown)$')
+                 | list | length == 0
+             and valid_node_rows | map('regex_replace', '\s+.*$', '')
+                 | unique | length == valid_node_rows | length }}
+        empty_output_accepted: "{{ [] | length > 0 }}"
+        empty_line_accepted: >-
+          {{ empty_line_node_rows | select('equalto', '') | list | length == 0 }}
+        duplicate_rows_accepted: >-
+          {{ duplicate_node_rows | map('regex_replace', '\s+.*$', '')
+             | unique | length == duplicate_node_rows | length }}
+        malformed_rows_accepted: >-
+          {{ malformed_node_rows
+             | reject('match', '^\S+\s+(True|False|Unknown)$')
+             | list | length == 0 }}
+        missing_node_names: >-
+          {{ missing_node_rows | map('regex_replace', '\s+.*$', '') | list }}
+        additional_node_names: >-
+          {{ additional_node_rows | map('regex_replace', '\s+.*$', '') | list }}
+
+    - name: Require strict Node row validation and whole name comparisons
+      ansible.builtin.assert:
+        that:
+          - valid_node_rows | reject('match', '^\S+\s+(True|False|Unknown)$') | list | length == 0
+          - parsed_node_names == expected_nodes
+          - expected_nodes | difference(parsed_node_names) | length == 0
+          - parsed_node_names | difference(expected_nodes) | length == 0
+          - parsed_not_ready_nodes == ['worker2']
+          - valid_rows_accepted | bool
+          - not (empty_output_accepted | bool)
+          - not (empty_line_accepted | bool)
+          - not (duplicate_rows_accepted | bool)
+          - not (malformed_rows_accepted | bool)
+          - expected_nodes | difference(missing_node_names) == ['worker2']
+          - missing_node_names | difference(expected_nodes) | length == 0
+          - expected_nodes | difference(additional_node_names) | length == 0
+          - additional_node_names | difference(expected_nodes) == ['extra']
+
+    - name: Calculate cache independent memory usage
+      ansible.builtin.set_fact:
+        memory_used_percent: >-
+          {{ (((memory_mb_fixture['nocache']['used'] | int)
+               / (memory_mb_fixture['real']['total'] | int)) * 100) | round(1) }}
+
+    - name: Require valid cache independent memory percentage
+      ansible.builtin.assert:
+        that:
+          - memory_mb_fixture['real']['total'] | int > 0
+          - memory_mb_fixture['nocache']['used'] | int >= 0
+          - memory_mb_fixture['nocache']['used'] | int <= memory_mb_fixture['real']['total'] | int
+          - memory_used_percent | float == 25.0
+          - memory_used_percent | float >= 0
+          - memory_used_percent | float <= 100
+
+    - name: Require Longhorn failures and malformed output to block the gate
+      ansible.builtin.assert:
+        that:
+          - longhorn_no_resources.rc == 0
+          - longhorn_no_resources.stdout | length == 0
+          - >-
+            not (longhorn_query_failure.rc == 0
+                 and (longhorn_query_failure.stdout | length == 0
+                      or longhorn_query_failure.stdout_lines
+                         | reject('match', '^[A-Za-z][A-Za-z0-9_-]*$')
+                         | list | length == 0))
+          - >-
+            longhorn_unparseable.stdout_lines
+            | reject('match', '^[A-Za-z][A-Za-z0-9_-]*$')
+            | list | length == 1
+          - longhorn_active_backup.stdout_lines | intersect(['New', 'Pending', 'InProgress']) == ['InProgress']
+          - longhorn_active_restore.stdout_lines | select('match', '^true\\|') | list == ['true|']
+          - >-
+            longhorn_restore_error.stdout_lines
+            | reject('match', '^(false)?\\|$')
+            | list == ['false|restore failed']
