@@ -1,0 +1,27 @@
+---
+- name: Validate Kubernetes Node name output
+  ansible.builtin.assert:
+    that:
+      - k3s_node_name_result.rc | int == 0
+      - k3s_node_name_result.stdout | trim | length > 0
+      - k3s_node_name_result.stdout_lines | length > 0
+      - >-
+        k3s_node_name_result.stdout_lines
+        | map('trim') | select('equalto', '') | list | length == 0
+      - >-
+        k3s_node_name_result.stdout_lines
+        | map('trim') | select('search', '\s') | list | length == 0
+
+- name: Store Kubernetes Node names as a native list
+  ansible.builtin.set_fact:
+    "{{ k3s_node_name_fact }}": >-
+      {{ k3s_node_name_result.stdout_lines | map('trim') | list }}
+
+- name: Require unique Kubernetes Node names
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', k3s_node_name_fact) | type_debug == 'list'
+      - lookup('vars', k3s_node_name_fact) | length > 0
+      - >-
+        lookup('vars', k3s_node_name_fact) | unique | length
+        == lookup('vars', k3s_node_name_fact) | length

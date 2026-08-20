@@ -1,0 +1,23 @@
+---
+- name: Validate every Kubernetes Node Ready result
+  ansible.builtin.assert:
+    that:
+      - k3s_node_ready_results.results | length == k3s_node_names | length
+      - item.rc | int == 0
+      - item.stdout | trim in ['True', 'False', 'Unknown']
+  loop: "{{ k3s_node_ready_results.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Initialize the non-Ready Kubernetes Node list
+  ansible.builtin.set_fact:
+    "{{ k3s_not_ready_fact }}": "{{ [] }}"
+
+- name: Record every Kubernetes Node that is not Ready
+  ansible.builtin.set_fact:
+    "{{ k3s_not_ready_fact }}": >-
+      {{ lookup('vars', k3s_not_ready_fact)
+         + ([item.item] if item.stdout | trim != 'True' else []) }}
+  loop: "{{ k3s_node_ready_results.results }}"
+  loop_control:
+    label: "{{ item.item }}"

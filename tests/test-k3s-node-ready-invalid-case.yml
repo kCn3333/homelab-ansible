@@ -1,0 +1,26 @@
+---
+- name: Initialize invalid Ready result rejection state
+  ansible.builtin.set_fact:
+    invalid_case_rejected: false
+
+- name: Require invalid Ready results to fail closed
+  block:
+    - name: Process an invalid production Ready result
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-ready-results.yml
+      vars:
+        k3s_node_ready_results: "{{ invalid_case.result }}"
+        k3s_node_names: "{{ tested_node_names }}"
+        k3s_not_ready_fact: invalid_tested_not_ready_nodes
+
+    - name: Fail when an invalid Ready result was accepted
+      ansible.builtin.fail:
+        msg: Invalid Ready result was unexpectedly accepted.
+  rescue:
+    - name: Record expected invalid Ready result rejection
+      ansible.builtin.set_fact:
+        invalid_case_rejected: true
+
+- name: Require invalid Ready result rejection
+  ansible.builtin.assert:
+    that:
+      - invalid_case_rejected | bool

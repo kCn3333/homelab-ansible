@@ -51,9 +51,10 @@ class PowerOnTests(unittest.TestCase):
         self.assertIn("selectattr('state', 'equalto', 'started')", "\n".join(gate))
         self.assertNotIn("selectattr('failed'", "\n".join(gate))
 
-    def test_node_names_use_output_name(self) -> None:
-        self.assertIn('"--output=name"', self.text)
-        self.assertIn("regex_replace', '^node/'", self.text)
+    def test_node_names_use_one_column_output(self) -> None:
+        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
+        self.assertNotIn("--output=name", self.text)
+        self.assertNotIn("regex_replace', '^node/'", self.text)
 
     def test_no_scheduling_or_extended_audits(self) -> None:
         lowered = self.text.lower()
@@ -105,6 +106,9 @@ class PowerOffTests(unittest.TestCase):
         self.assertIn("selectattr('state', 'equalto', 'started')", self.text)
         self.assertNotIn("selectattr('failed'", self.text)
         self.assertNotIn("rejectattr('failed'", self.text)
+        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
+        self.assertNotIn("--output=name", self.text)
+        self.assertNotIn("regex_replace', '^node/'", self.text)
 
 
 class HealthTests(unittest.TestCase):
@@ -131,7 +135,10 @@ class HealthTests(unittest.TestCase):
     def test_probe_node_and_memory_parsers_are_fail_closed(self) -> None:
         self.assertIn("item.state == 'started'", self.text)
         self.assertNotIn("item.failed", self.text)
-        self.assertIn("custom-columns=NAME:", self.text)
+        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
+        self.assertNotIn("custom-columns=NAME:.metadata.name,READY:", self.text)
+        self.assertIn("get\n          - node", self.text)
+        self.assertIn("status.conditions", self.text)
         self.assertIn("memory_mb']['nocache']['used", self.text)
         self.assertNotIn("memfree_mb", self.text)
 
@@ -151,6 +158,11 @@ class LifecycleStaticRegressionTests(unittest.TestCase):
         self.assertNotIn("ignore_errors", combined)
         self.assertIsNone(
             re.search(r"(?m)^\\s+(?:ansible\\.builtin\\.)?(?:shell|raw):", combined)
+        )
+        self.assertNotIn("--output=name", combined)
+        self.assertNotIn("regex_replace', '^node/'", combined)
+        self.assertEqual(
+            3, combined.count("--output=custom-columns=NAME:.metadata.name")
         )
 
 

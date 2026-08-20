@@ -1,0 +1,113 @@
+---
+- name: Verify production Kubernetes Node state processing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    valid_name_result:
+      rc: 0
+      stdout: "master\nworker1\nworker2"
+      stdout_lines: [master, worker1, worker2]
+    duplicate_name_result:
+      rc: 0
+      stdout: "master\nworker1\nworker1"
+      stdout_lines: [master, worker1, worker1]
+    empty_name_result:
+      rc: 0
+      stdout: "master\n\nworker2"
+      stdout_lines: [master, '', worker2]
+    whitespace_name_result:
+      rc: 0
+      stdout: "master\nworker 1\nworker2"
+      stdout_lines: [master, worker 1, worker2]
+    all_ready_results:
+      results:
+        - {item: master, rc: 0, stdout: 'True'}
+        - {item: worker1, rc: 0, stdout: 'True'}
+        - {item: worker2, rc: 0, stdout: 'True'}
+    false_ready_results:
+      results:
+        - {item: master, rc: 0, stdout: 'True'}
+        - {item: worker1, rc: 0, stdout: 'False'}
+        - {item: worker2, rc: 0, stdout: 'True'}
+    unknown_ready_results:
+      results:
+        - {item: master, rc: 0, stdout: 'True'}
+        - {item: worker1, rc: 0, stdout: 'Unknown'}
+        - {item: worker2, rc: 0, stdout: 'True'}
+    empty_ready_results:
+      results:
+        - {item: master, rc: 0, stdout: 'True'}
+        - {item: worker1, rc: 0, stdout: ''}
+        - {item: worker2, rc: 0, stdout: 'True'}
+    failed_ready_results:
+      results:
+        - {item: master, rc: 0, stdout: 'True'}
+        - {item: worker1, rc: 1, stdout: ''}
+        - {item: worker2, rc: 0, stdout: 'True'}
+  tasks:
+    - name: Process valid production Node names
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-names.yml
+      vars:
+        k3s_node_name_result: "{{ valid_name_result }}"
+        k3s_node_name_fact: tested_node_names
+
+    - name: Require exact native production Node name list
+      ansible.builtin.assert:
+        that:
+          - tested_node_names | type_debug == 'list'
+          - tested_node_names == ['master', 'worker1', 'worker2']
+
+    - name: Process all Ready production results
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-ready-results.yml
+      vars:
+        k3s_node_ready_results: "{{ all_ready_results }}"
+        k3s_node_names: "{{ tested_node_names }}"
+        k3s_not_ready_fact: tested_not_ready_nodes
+
+    - name: Require no non-Ready Nodes
+      ansible.builtin.assert:
+        that:
+          - tested_not_ready_nodes == []
+
+    - name: Process a False production Ready result
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-ready-results.yml
+      vars:
+        k3s_node_ready_results: "{{ false_ready_results }}"
+        k3s_node_names: "{{ tested_node_names }}"
+        k3s_not_ready_fact: tested_not_ready_nodes
+
+    - name: Require the False Node only
+      ansible.builtin.assert:
+        that:
+          - tested_not_ready_nodes == ['worker1']
+
+    - name: Process an Unknown production Ready result
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-ready-results.yml
+      vars:
+        k3s_node_ready_results: "{{ unknown_ready_results }}"
+        k3s_node_names: "{{ tested_node_names }}"
+        k3s_not_ready_fact: tested_not_ready_nodes
+
+    - name: Require the Unknown Node only
+      ansible.builtin.assert:
+        that:
+          - tested_not_ready_nodes == ['worker1']
+
+    - name: Reject invalid production Node name results
+      ansible.builtin.include_tasks: test-k3s-node-state-invalid-case.yml
+      loop:
+        - {name: duplicate, result: "{{ duplicate_name_result }}"}
+        - {name: empty, result: "{{ empty_name_result }}"}
+        - {name: whitespace, result: "{{ whitespace_name_result }}"}
+      loop_control:
+        loop_var: invalid_case
+
+    - name: Reject invalid production Ready results
+      ansible.builtin.include_tasks: test-k3s-node-ready-invalid-case.yml
+      loop:
+        - {name: empty-status, result: "{{ empty_ready_results }}"}
+        - {name: kubectl-error, result: "{{ failed_ready_results }}"}
+      loop_control:
+        loop_var: invalid_case

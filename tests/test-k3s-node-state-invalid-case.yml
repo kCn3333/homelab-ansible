@@ -1,0 +1,25 @@
+---
+- name: Initialize invalid Node name rejection state
+  ansible.builtin.set_fact:
+    invalid_case_rejected: false
+
+- name: Require invalid Node names to fail closed
+  block:
+    - name: Process an invalid production Node name result
+      ansible.builtin.include_tasks: ../cluster/tasks/k3s-node-names.yml
+      vars:
+        k3s_node_name_result: "{{ invalid_case.result }}"
+        k3s_node_name_fact: invalid_tested_node_names
+
+    - name: Fail when invalid Node names were accepted
+      ansible.builtin.fail:
+        msg: Invalid Node names were unexpectedly accepted.
+  rescue:
+    - name: Record expected invalid Node name rejection
+      ansible.builtin.set_fact:
+        invalid_case_rejected: true
+
+- name: Require invalid Node name rejection
+  ansible.builtin.assert:
+    that:
+      - invalid_case_rejected | bool
