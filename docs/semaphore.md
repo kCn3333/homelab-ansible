@@ -49,21 +49,19 @@ The K3s project may expose three deliberately ordered templates:
 - `K3S | 30 Approved Shutdown`.
 
 Power On requires private inventory MAC values plus reviewed WoL broadcast,
-port, SSH timeout, optional Node-name mappings, and no Semaphore limit.
+optional port and timeout controls, and no Semaphore limit.
 Approved Shutdown requires both
 `k3s_power_action=shutdown` and
-`k3s_shutdown_confirm=SHUTDOWN_K3S_CLUSTER`. It cordons but does not drain.
+`k3s_shutdown_confirm=SHUTDOWN_K3S_CLUSTER`. It neither cordons nor drains.
 Template details and additional controls are in
 [`k3s-power-management.md`](k3s-power-management.md). Do not schedule shutdown
 automatically.
 
-The lifecycle inventory may override `k3s_binary_path` (default
-`/usr/local/bin/k3s`) and `k3s_node_name` (default `inventory_hostname`) per
-host. `expected_system_hostname` is optional and is checked only when set.
-`k3s_health_expect_flux`, `k3s_health_expect_longhorn`, and
-`k3s_health_expect_cnpg` default to `true`: missing CRDs, malformed results,
-empty required resources, or unhealthy state then fail closed. Setting an
-integration explicitly to `false` skips its queries and reports `NOT_CHECKED`.
+Inventory aliases must match Kubernetes Node names. Basic Health uses
+`k3s_health_mode=report` by default; `strict` also fails on warnings. Extended
+GitOps, storage, and workload health will use separate future playbooks.
+Approved Shutdown checks Longhorn backup/restore activity by default; an
+explicit `k3s_shutdown_check_longhorn=false` reports `NOT_CHECKED`.
 
 Neither Power On nor Approved Shutdown may use `--limit`. Shutdown does not
 drain and requires both confirmation variables above. Its success means only
