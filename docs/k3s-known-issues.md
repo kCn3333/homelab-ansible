@@ -8,7 +8,7 @@ details or private inventory and does not authorize remediation.
 - all three hosts were reachable and K3s was active on every node;
 - `worker1` was SSH REACHABLE, K3s was active, had zero failed systemd
   units, and did not require a reboot;
-- `worker2` had two failed systemd units and required a reboot;
+- `worker2` awaits a reboot after a kernel update;
 - K3s reported version `v1.34.4+k3s1`;
 - local API readiness and etcd checks passed;
 - the live Node set matched inventory and every Node was Ready;
@@ -23,7 +23,12 @@ details or private inventory and does not authorize remediation.
   EXT4 `error -5` warnings for a device presented by the storage layer;
 - the `metrics-server` HelmRelease was not Ready;
 - two `nginx-test` Pods in the `flux-test` namespace remained Pending;
-- the Longhorn `BackupTarget/default` resource reported `available=false`.
+- the Longhorn `BackupTarget/default` resource was unavailable and requires
+  later diagnosis;
+- `fwupd.service` and `fwupd-refresh.service` require verification after the
+  `worker2` reboot;
+- the Power Off validation exposed an invalid JSONPath assumption that treated
+  Longhorn Engine `restoreStatus` as a list instead of a map.
 
 The previous-boot storage warnings require a later Longhorn inspection before
 Approved Power Off is accepted operationally. This lifecycle correction does
@@ -39,4 +44,5 @@ block Basic Power Off when no backup or restore operation is active.
 - diagnose the `metrics-server` HelmRelease;
 - decide whether the `flux-test` namespace and workload are still required;
 - recheck Garage connectivity and BackupTarget availability;
+- verify `fwupd.service` and `fwupd-refresh.service` after the `worker2` reboot;
 - later implement separate GitOps, storage, and workload audit playbooks.

@@ -111,7 +111,7 @@
       changed_when: false
       when: k3s_shutdown_check_longhorn | bool
 
-    - name: Read Longhorn restore states
+    - name: Read Longhorn Engines for restore validation
       ansible.builtin.command:
         argv:
           - "{{ k3s_binary_path }}"
@@ -119,12 +119,26 @@
           - get
           - engines.longhorn.io
           - --all-namespaces
-          - '--output=jsonpath={range .items[*].status.restoreStatus[*]}{.isRestoring}{"|"}{.error}{"\n"}{end}'
-      register: k3s_longhorn_restore_states
+          - --output=json
+      register: k3s_longhorn_engines
       changed_when: false
+      no_log: true
       when: k3s_shutdown_check_longhorn | bool
 
-    - name: Validate Longhorn query output
+    - name: Validate Longhorn Engine restore state locally
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/../../scripts/check-longhorn-restore.py"
+        stdin: "{{ k3s_longhorn_engines.stdout }}"
+      register: k3s_longhorn_restore_check
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: k3s_shutdown_check_longhorn | bool
+
+    - name: Validate Longhorn backup query output
       ansible.builtin.assert:
         that:
           - >-
@@ -133,22 +147,14 @@
                 and k3s_longhorn_backup_states.stdout_lines
                     | reject('match', '^[A-Za-z][A-Za-z0-9_-]*$')
                     | list | length == 0)
-          - >-
-            k3s_longhorn_restore_states.stdout | length == 0
-            or (k3s_longhorn_restore_states.stdout_lines | length > 0
-                and k3s_longhorn_restore_states.stdout_lines
-                    | reject('match', '^(true|false)\\|.*$')
-                    | list | length == 0)
-        fail_msg: Unparseable Longhorn output blocks shutdown.
+        fail_msg: Unparseable Longhorn backup output blocks shutdown.
       when: k3s_shutdown_check_longhorn | bool
 
-    - name: Require no active backup restore or restore error
+    - name: Require no active Longhorn backup
       ansible.builtin.assert:
         that:
           - k3s_longhorn_backup_states.stdout_lines | intersect(['New', 'Pending', 'InProgress']) | length == 0
-          - k3s_longhorn_restore_states.stdout_lines | select('match', '^true\\|') | list | length == 0
-          - k3s_longhorn_restore_states.stdout_lines | reject('match', '^(false)?\\|$') | list | length == 0
-        fail_msg: An active Longhorn backup, restore, or restore error blocks shutdown.
+        fail_msg: An active Longhorn backup blocks shutdown.
       when: k3s_shutdown_check_longhorn | bool
 
     - name: Report skipped Longhorn storage gate

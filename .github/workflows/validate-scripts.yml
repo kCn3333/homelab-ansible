@@ -47,6 +47,7 @@ jobs:
             *) echo "bootstrap-managed-host: FAIL" >&2; exit "$bootstrap_rc" ;;
           esac
           python3 tests/test-send-wol.py
+          python3 tests/test-check-longhorn-restore.py
           python3 tests/test-k3s-lifecycle.py
           ansible-playbook -i localhost, --connection=local tests/test-ansible-json-item-access.yml
           ansible-playbook -i localhost, --connection=local tests/test-k3s-lifecycle-runtime.yml
@@ -58,7 +59,9 @@ jobs:
       - name: Check executable modes
         run: |
           test -x cluster/scripts/send-wol.py
+          test -x cluster/scripts/check-longhorn-restore.py
           test -x scripts/scan-public-tree.py
+          test -x tests/test-check-longhorn-restore.py
           test -x tests/test-send-wol.py
           test -x tests/test-k3s-lifecycle.py
           test -z "$(find cluster/playbooks docs -type f -perm /111 -print -quit)"
