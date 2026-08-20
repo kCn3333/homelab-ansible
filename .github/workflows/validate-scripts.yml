@@ -50,6 +50,7 @@ jobs:
           python3 tests/test-k3s-lifecycle.py
           ansible-playbook -i localhost, --connection=local tests/test-ansible-json-item-access.yml
           ansible-playbook -i localhost, --connection=local tests/test-k3s-lifecycle-runtime.yml
+          ansible-playbook -i localhost, --connection=local tests/test-k3s-node-state-collection.yml
 
       - name: Compile Python helpers
         run: python3 -m compileall -q cluster/scripts scripts tests
@@ -64,6 +65,7 @@ jobs:
           test ! -x .github/workflows/validate-scripts.yml
           test ! -x tests/test-ansible-json-item-access.yml
           test ! -x tests/test-k3s-lifecycle-runtime.yml
+          test ! -x tests/test-k3s-node-state-collection.yml
 
       - name: Parse workflow YAML
         run: python3 -c 'import pathlib, yaml; yaml.safe_load(pathlib.Path(".github/workflows/validate-scripts.yml").read_text())'

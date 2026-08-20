@@ -165,7 +165,7 @@
   vars:
     k3s_binary_path: /usr/local/bin/k3s
   tasks:
-    - name: Read Node names and Ready conditions
+    - name: Read Kubernetes Node names
       ansible.builtin.command:
         argv:
           - "{{ k3s_binary_path }}"
@@ -173,37 +173,37 @@
           - get
           - nodes
           - --no-headers
-          - '--output=custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status'
-      register: k3s_health_node_rows
+          - --output=custom-columns=NAME:.metadata.name
+      register: k3s_health_node_names
       changed_when: false
 
-    - name: Validate Node rows before parsing
-      ansible.builtin.assert:
-        that:
-          - k3s_health_node_rows.stdout | trim | length > 0
-          - k3s_health_node_rows.stdout_lines | length > 0
-          - k3s_health_node_rows.stdout_lines | select('equalto', '') | list | length == 0
-          - >-
-            k3s_health_node_rows.stdout_lines
-            | reject('match', '^\\S+\\s+(True|False|Unknown)$')
-            | list | length == 0
+    - name: Validate and store Kubernetes Node names
+      ansible.builtin.include_tasks: ../../tasks/k3s-node-names.yml
+      vars:
+        k3s_node_name_result: "{{ k3s_health_node_names }}"
+        k3s_node_name_fact: k3s_health_live_node_names
 
-    - name: Store parsed Node rows
-      ansible.builtin.set_fact:
-        k3s_health_live_node_names: >-
-          {{ k3s_health_node_rows.stdout_lines
-             | map('regex_replace', '\\s+.*$', '') | list }}
-        k3s_health_not_ready_nodes: >-
-          {{ k3s_health_node_rows.stdout_lines
-             | reject('match', '^\\S+\\s+True$')
-             | map('regex_replace', '\\s+.*$', '') | list }}
+    - name: Read the Ready condition for every Kubernetes Node
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - node
+          - "{{ item }}"
+          - '--output=jsonpath={.status.conditions[?(@.type=="Ready")].status}'
+      loop: "{{ k3s_health_live_node_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: k3s_health_node_ready_results
+      changed_when: false
 
-    - name: Require unique nonempty Node names
-      ansible.builtin.assert:
-        that:
-          - k3s_health_live_node_names | length > 0
-          - k3s_health_live_node_names | unique | length == k3s_health_live_node_names | length
-          - k3s_health_live_node_names | reject('match', '^.+$') | list | length == 0
+    - name: Validate and store non-Ready Kubernetes Nodes
+      ansible.builtin.include_tasks: ../../tasks/k3s-node-ready-results.yml
+      vars:
+        k3s_node_ready_results: "{{ k3s_health_node_ready_results }}"
+        k3s_node_names: "{{ k3s_health_live_node_names }}"
+        k3s_not_ready_fact: k3s_health_not_ready_nodes
 
 - name: Report and enforce basic health policy
   hosts: localhost

@@ -59,26 +59,31 @@
 
     - name: Read Kubernetes Node names
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, nodes, "--output=name"]
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - nodes
+          - --no-headers
+          - --output=custom-columns=NAME:.metadata.name
       register: k3s_shutdown_nodes
       changed_when: false
 
-    - name: Build expected and live Node names
+    - name: Build expected Node names
       ansible.builtin.set_fact:
         k3s_expected_node_names: "{{ groups.k3s_cluster }}"
-        k3s_shutdown_node_names: >-
-          {{ k3s_shutdown_nodes.stdout_lines
-             | map('trim')
-             | reject('equalto', '')
-             | map('regex_replace', '^node/', '')
-             | list }}
+
+    - name: Validate and store live Kubernetes Node names
+      ansible.builtin.include_tasks: ../../tasks/k3s-node-names.yml
+      vars:
+        k3s_node_name_result: "{{ k3s_shutdown_nodes }}"
+        k3s_node_name_fact: k3s_shutdown_node_names
 
     - name: Require exact Node membership
       ansible.builtin.assert:
         that:
           - k3s_shutdown_node_names | length == 3
           - k3s_shutdown_node_names | unique | length == 3
-          - k3s_shutdown_node_names | reject('match', '^.+$') | list | length == 0
           - k3s_expected_node_names | sort == k3s_shutdown_node_names | sort
         fail_msg: >-
           Node mismatch; missing={{ k3s_expected_node_names | difference(k3s_shutdown_node_names) }},
