@@ -101,8 +101,9 @@ class PowerOffTests(unittest.TestCase):
 
     def test_storage_and_partial_probe_parsers_are_fail_closed(self) -> None:
         self.assertIn("--output=custom-columns=STATE:.status.state", self.text)
-        self.assertIn('{"|"}', self.text)
-        self.assertIn('{"\\n"}', self.text)
+        self.assertIn("--output=json", self.text)
+        self.assertIn("check-longhorn-restore.py", self.text)
+        self.assertNotIn("restoreStatus[*]", self.text)
         self.assertIn("selectattr('state', 'equalto', 'started')", self.text)
         self.assertNotIn("selectattr('failed'", self.text)
         self.assertNotIn("rejectattr('failed'", self.text)
