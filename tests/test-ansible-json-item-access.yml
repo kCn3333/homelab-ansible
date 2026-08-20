@@ -7,6 +7,19 @@
   vars:
     expected_hosts: [master, worker1, worker2]
     live_hosts: [worker2, master, worker1]
+    mac_pattern: '^(?:(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2})$'
+    valid_unicast_macs:
+      - 7c:d3:0a:76:b6:f4
+      - 7C:D3:0A:76:B6:F4
+      - 7c-d3-0a-76-b6-f4
+    invalid_macs:
+      - 7c:d3:0a:76:b6
+      - 7c:d3:0a:76:b6:f4:00
+      - 7c:d3-0a:76:b6:f4
+      - zz:d3:0a:76:b6:f4
+      - ''
+      - 01:00:5e:00:00:01
+      - ff:ff:ff:ff:ff:ff
   tasks:
     - name: Build the inventory contract with native lists
       ansible.builtin.set_fact:
@@ -32,3 +45,26 @@
           - nodes_missing | length == 0
           - nodes_unexpected | length == 0
           - live_hosts | sort == ['master', 'worker1', 'worker2']
+
+    - name: Accept supported unicast MAC formats
+      ansible.builtin.assert:
+        that:
+          - item is match(mac_pattern)
+          - ((item | regex_replace('[:-]', ''))[0:2] | int(base=16)) % 2 == 0
+      loop: "{{ valid_unicast_macs }}"
+      loop_control:
+        label: valid-unicast-mac
+      no_log: true
+
+    - name: Reject malformed multicast and broadcast MAC values
+      ansible.builtin.assert:
+        that:
+          - >-
+            not (
+              item is match(mac_pattern)
+              and ((item | regex_replace('[:-]', ''))[0:2] | int(base=16)) % 2 == 0
+            )
+      loop: "{{ invalid_macs }}"
+      loop_control:
+        label: invalid-mac
+      no_log: true
