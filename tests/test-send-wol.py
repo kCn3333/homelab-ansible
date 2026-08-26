@@ -20,9 +20,10 @@ SPEC.loader.exec_module(send_wol)
 
 
 class FakeSocket:
-    def __init__(self, family: int, kind: int) -> None:
+    def __init__(self, family: int, kind: int, fail_at: str | None = None) -> None:
         self.family = family
         self.kind = kind
+        self.fail_at = fail_at
         self.options: list[tuple[int, int, int]] = []
         self.datagrams: list[tuple[bytes, tuple[str, int]]] = []
 
@@ -33,32 +34,27 @@ class FakeSocket:
         return False
 
     def setsockopt(self, level: int, option: int, value: int) -> None:
-        self.options.append((level, option, value))
-
-    def sendto(self, payload: bytes, destination: tuple[str, int]) -> int:
-        self.datagrams.append((payload, destination))
-        return len(payload)
-
-
-class FailingSocket(FakeSocket):
-    def __init__(self, family: int, kind: int, fail_at: str) -> None:
-        super().__init__(family, kind)
-        self.fail_at = fail_at
-
-    def setsockopt(self, level: int, option: int, value: int) -> None:
         if self.fail_at == "setsockopt":
             raise OSError("synthetic setsockopt failure")
-        super().setsockopt(level, option, value)
+        self.options.append((level, option, value))
 
     def sendto(self, payload: bytes, destination: tuple[str, int]) -> int:
         if self.fail_at == "sendto":
             raise OSError("synthetic sendto failure")
         if self.fail_at == "short":
             return len(payload) - 1
-        return super().sendto(payload, destination)
+        self.datagrams.append((payload, destination))
+        return len(payload)
 
 
 class WakeOnLanTests(unittest.TestCase):
+    def send(self, **overrides):
+        arguments = {
+            "mac": "02:11:22:33:44:55", "broadcast": "192.0.2.255",
+            "port": 9, "count": 1, "interval": 0, "socket_factory": FakeSocket,
+        }
+        return send_wol.send_magic_packets(**(arguments | overrides))
+
     def test_magic_packet_content_and_length(self) -> None:
         packet = send_wol.build_magic_packet("02:11:22:33:44:55")
         self.assertEqual(102, len(packet))
@@ -84,19 +80,10 @@ class WakeOnLanTests(unittest.TestCase):
     def test_port_boundaries_and_invalid_values(self) -> None:
         for port in (1, 65535):
             with self.subTest(port=port):
-                self.assertEqual(
-                    1,
-                    send_wol.send_magic_packets(
-                        "02:11:22:33:44:55", "192.0.2.255", port, 1, 0,
-                        socket_factory=FakeSocket,
-                    ),
-                )
+                self.assertEqual(1, self.send(port=port))
         for port in (0, 65536):
             with self.subTest(port=port), self.assertRaises(send_wol.ValidationError):
-                send_wol.send_magic_packets(
-                    "02:11:22:33:44:55", "192.0.2.255", port, 1, 0,
-                    socket_factory=FakeSocket,
-                )
+                self.send(port=port)
 
     def test_invalid_broadcast_is_rejected(self) -> None:
         for value in ("not-an-address", "::1", "127.0.0.1", "0.0.0.0"):
@@ -135,34 +122,19 @@ class WakeOnLanTests(unittest.TestCase):
         for count in (1, 100):
             created: list[FakeSocket] = []
             factory = lambda family, kind: created.append(FakeSocket(family, kind)) or created[-1]
-            self.assertEqual(
-                count,
-                send_wol.send_magic_packets(
-                    "02:11:22:33:44:55", "192.0.2.255", 9, count, 0,
-                    socket_factory=factory, sleep=lambda _: None,
-                ),
-            )
+            self.assertEqual(count, self.send(count=count, socket_factory=factory, sleep=lambda _: None))
             self.assertEqual(count, len(created[0].datagrams))
         for count in (-1, 0, 101):
             with self.subTest(count=count), self.assertRaises(send_wol.ValidationError):
-                send_wol.send_magic_packets(
-                    "02:11:22:33:44:55", "192.0.2.255", 9, count, 0,
-                    socket_factory=FakeSocket,
-                )
+                self.send(count=count)
 
     def test_interval_validation_and_sleep_counts(self) -> None:
         for interval in (-1.0, float("nan"), float("inf"), float("-inf")):
             with self.subTest(interval=interval), self.assertRaises(send_wol.ValidationError):
-                send_wol.send_magic_packets(
-                    "02:11:22:33:44:55", "192.0.2.255", 9, 1, interval,
-                    socket_factory=FakeSocket,
-                )
+                self.send(interval=interval)
         for interval in (0.0, 0.25):
             sleeps: list[float] = []
-            send_wol.send_magic_packets(
-                "02:11:22:33:44:55", "192.0.2.255", 9, 1, interval,
-                socket_factory=FakeSocket, sleep=sleeps.append,
-            )
+            self.send(interval=interval, sleep=sleeps.append)
             self.assertEqual([], sleeps)
 
     def test_socket_failures_and_incomplete_send_are_propagated(self) -> None:
@@ -171,16 +143,14 @@ class WakeOnLanTests(unittest.TestCase):
 
         factories = {
             "socket": socket_failure,
-            "setsockopt": lambda family, kind: FailingSocket(family, kind, "setsockopt"),
-            "sendto": lambda family, kind: FailingSocket(family, kind, "sendto"),
-            "short": lambda family, kind: FailingSocket(family, kind, "short"),
+            **{
+                failure: lambda family, kind, failure=failure: FakeSocket(family, kind, failure)
+                for failure in ("setsockopt", "sendto", "short")
+            },
         }
         for name, factory in factories.items():
             with self.subTest(name=name), self.assertRaises(OSError):
-                send_wol.send_magic_packets(
-                    "02:11:22:33:44:55", "192.0.2.255", 9, 1, 0,
-                    socket_factory=factory,
-                )
+                self.send(socket_factory=factory)
 
     def test_cli_success_and_validation_exit_codes_without_network(self) -> None:
         with mock.patch.object(send_wol.socket, "socket", FakeSocket), redirect_stdout(StringIO()):
