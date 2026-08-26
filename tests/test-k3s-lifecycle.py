@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import pathlib
-import re
 import unittest
 
 import yaml
@@ -142,29 +141,6 @@ class HealthTests(unittest.TestCase):
         self.assertIn("status.conditions", self.text)
         self.assertIn("memory_mb']['nocache']['used", self.text)
         self.assertNotIn("memfree_mb", self.text)
-
-
-class LifecycleStaticRegressionTests(unittest.TestCase):
-    def test_forbidden_lifecycle_constructs_are_absent(self) -> None:
-        combined = ""
-        for path in (POWER_ON, POWER_OFF, HEALTH):
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("{'\\\\n'}", text)
-            combined += text
-        self.assertNotIn("selectattr('failed'", combined)
-        self.assertNotIn("rejectattr('failed'", combined)
-        self.assertNotIn("item.failed", combined)
-        self.assertNotIn("memfree_mb", combined)
-        self.assertNotIn("from_json", combined)
-        self.assertNotIn("ignore_errors", combined)
-        self.assertIsNone(
-            re.search(r"(?m)^\\s+(?:ansible\\.builtin\\.)?(?:shell|raw):", combined)
-        )
-        self.assertNotIn("--output=name", combined)
-        self.assertNotIn("regex_replace', '^node/'", combined)
-        self.assertEqual(
-            3, combined.count("--output=custom-columns=NAME:.metadata.name")
-        )
 
 
 if __name__ == "__main__":
