@@ -24,6 +24,23 @@
           become: false
           no_log: true
 
+        - name: Read failed systemd units before maintenance
+          ansible.builtin.command:
+            cmd: systemctl --failed --no-legend --plain --no-pager
+          register: automatic_failed_units_before_maintenance
+          changed_when: false
+
+        - name: Select failed systemd unit names before maintenance
+          ansible.builtin.set_fact:
+            automatic_failed_unit_names_before_maintenance: >-
+              {{ automatic_failed_units_before_maintenance.stdout_lines
+                 | default([])
+                 | select('match', '^\s*\S+\s+\S+\s+failed\s+failed(?:\s|$)')
+                 | map('regex_replace', '^\s*(\S+).*', '\1')
+                 | unique
+                 | sort
+                 | list }}
+
         - name: Refresh APT cache when stale
           ansible.builtin.apt:
             update_cache: true
@@ -102,12 +119,50 @@
           changed_when: false
           failed_when: false
 
-        - name: Require a successful systemd check with no failed units
+        - name: Require a successful post-maintenance systemd check
           ansible.builtin.assert:
             that:
               - automatic_failed_units_after_cleanup.rc | default(1) == 0
-              - automatic_failed_units_after_cleanup.stdout_lines | default([]) | length == 0
-            fail_msg: Automatic maintenance detected failed systemd units.
+            fail_msg: Automatic maintenance could not read failed systemd units.
+
+        - name: Select failed systemd unit names after maintenance
+          ansible.builtin.set_fact:
+            automatic_failed_unit_names_after_maintenance: >-
+              {{ automatic_failed_units_after_cleanup.stdout_lines
+                 | default([])
+                 | select('match', '^\s*\S+\s+\S+\s+failed\s+failed(?:\s|$)')
+                 | map('regex_replace', '^\s*(\S+).*', '\1')
+                 | unique
+                 | sort
+                 | list }}
+
+        - name: Classify failed systemd units after maintenance
+          ansible.builtin.set_fact:
+            automatic_new_failed_units: >-
+              {{ automatic_failed_unit_names_after_maintenance
+                 | difference(automatic_failed_unit_names_before_maintenance)
+                 | sort
+                 | list }}
+            automatic_preexisting_failed_units: >-
+              {{ automatic_failed_unit_names_after_maintenance
+                 | intersect(automatic_failed_unit_names_before_maintenance)
+                 | sort
+                 | list }}
+
+        - name: Report pre-existing failed systemd units
+          ansible.builtin.debug:
+            msg: >-
+              Automatic maintenance did not introduce these failed systemd units,
+              but they remain failed: {{ automatic_preexisting_failed_units | join(', ') }}
+          when: automatic_preexisting_failed_units | length > 0
+
+        - name: Require no new failed systemd units
+          ansible.builtin.assert:
+            that:
+              - automatic_new_failed_units | length == 0
+            fail_msg: >-
+              Automatic maintenance introduced failed systemd units:
+              {{ automatic_new_failed_units | join(', ') }}
 
         - name: Notify that a reboot is required
           ansible.builtin.uri:
@@ -140,8 +195,11 @@
               reboot_required: >-
                 {{ automatic_reboot_required.stat.exists | default(false) }}
               failed_systemd_units: >-
-                {{ automatic_failed_units_after_cleanup.stdout_lines
-                   | default([]) | length }}
+                {{ automatic_failed_unit_names_after_maintenance | length }}
+              preexisting_failed_systemd_units: >-
+                {{ automatic_preexisting_failed_units | length }}
+              new_failed_systemd_units: >-
+                {{ automatic_new_failed_units | length }}
               orphaned_failed_units_reset: >-
                 {{ automatic_orphaned_failed_units | default([]) | length }}
 

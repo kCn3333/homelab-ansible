@@ -51,9 +51,10 @@ into the separate cluster project.
 - `playbooks/maintenance/apt-automatic.yml`: processes one explicitly selected
   `update_automatic` host at a time, performs an APT distribution upgrade,
   removes obsolete packages with purge, runs autoclean and clean, and fails if
-  any systemd units remain failed. After reloading systemd, it clears only
-  orphaned failed entries whose unit files are no longer present, then checks
-  all failed units again.
+  maintenance introduces a new failed systemd unit. After reloading systemd,
+  it clears only orphaned failed entries whose unit files are no longer present.
+  Failed units that already existed before maintenance are reported but do not
+  incorrectly mark the APT run as failed.
 - `playbooks/maintenance/reboot-required.yml`: reboots exactly one manually
   approved host from `reboot_approved`, then validates the reboot-required
   marker and failed systemd units after SSH connectivity returns.
