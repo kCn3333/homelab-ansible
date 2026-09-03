@@ -60,9 +60,13 @@ No general shutdown, firewall, SSH configuration, cluster installation, or
 unrelated cleanup automation is included.
 
 K3s power operations are deliberately separate from general host maintenance.
-Power On validates the complete private inventory without a limit, sends
-Wake-on-LAN packets from the controller, then checks each local Kubernetes API,
-its etcd backend, and the exact Ready Node set without changing scheduling.
+Power On validates the complete private inventory without a limit. It
+temporarily activates an existing manual Netplan VLAN profile on the single
+explicit `k3s_wol_gateway`, sends all Wake-on-LAN packets there, and deactivates
+it before waiting for cluster SSH. It then
+checks each local Kubernetes API, its etcd backend, and the exact Ready Node set
+without changing scheduling. The lifecycle playbook does not edit Netplan or
+create or remove the interface.
 Health Check is read-only and supports `report` and `strict` policies. Approved
 Shutdown requires the complete cluster plus two explicit confirmations,
 checks Ready Nodes and active Longhorn backup/restore safety without cordon or

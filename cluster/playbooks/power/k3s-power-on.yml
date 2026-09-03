@@ -1,41 +1,28 @@
 ---
-- name: Validate inventory wake every node and wait for SSH
+- name: Validate the complete Power On inventory
   hosts: localhost
   connection: local
   gather_facts: false
   become: false
-  vars:
-    k3s_wol_port: 9
-    k3s_wol_count: 3
-    k3s_wol_interval: 0.2
-    k3s_ssh_wait_timeout: 300
   tasks:
-    - name: Require the complete three-node inventory without limit
+    - name: Require the complete cluster and one WOL gateway without limit
       ansible.builtin.assert:
         that:
           - ansible_limit is not defined or ansible_limit | trim | length == 0
           - "'masters' in groups"
           - "'workers' in groups"
           - "'k3s_cluster' in groups"
+          - "'k3s_wol_gateway' in groups"
           - groups.masters | length == 1
           - groups.workers | length == 2
           - groups.k3s_cluster | length == 3
+          - groups.k3s_wol_gateway | length == 1
           - groups.masters | intersect(groups.workers) | length == 0
           - groups.k3s_cluster | sort == (groups.masters + groups.workers) | sort
-        fail_msg: Power On requires the complete three-node inventory and rejects --limit.
-
-    - name: Validate controller Wake-on-LAN settings
-      ansible.builtin.assert:
-        that:
-          - k3s_wol_broadcast is defined
-          - k3s_wol_broadcast is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
-          - k3s_wol_broadcast.split('.') | map('int') | max <= 255
-          - k3s_wol_port | int >= 1
-          - k3s_wol_port | int <= 65535
-          - k3s_wol_count | int >= 1
-          - k3s_wol_count | int <= 100
-          - k3s_wol_interval | float >= 0
-          - k3s_ssh_wait_timeout | int >= 1
+          - groups.k3s_wol_gateway | intersect(groups.k3s_cluster) | length == 0
+        fail_msg: >-
+          Power On requires the complete three-node cluster, exactly one separate
+          k3s_wol_gateway, and no --limit.
 
     - name: Validate every host address MAC and Node name
       ansible.builtin.assert:
@@ -62,28 +49,100 @@
           - k3s_normalized_macs | unique | length == 3
           - groups.k3s_cluster | unique | length == 3
 
-    - name: Send Wake-on-LAN to every host before probing SSH
+- name: Activate use and deactivate the existing WOL VLAN profile
+  hosts: k3s_wol_gateway
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require private WOL gateway network variables
+      ansible.builtin.assert:
+        that:
+          - k3s_wol_interface is defined
+          - k3s_wol_broadcast is defined
+          - k3s_wol_interface is match('^[A-Za-z0-9_.-]{1,15}$')
+          - k3s_wol_broadcast | string | trim | length > 0
+
+    - name: Verify systemd-networkd is active
       ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - "{{ playbook_dir }}/../../scripts/send-wol.py"
-          - --mac
-          - "{{ hostvars[item].mac_address }}"
-          - --broadcast
-          - "{{ k3s_wol_broadcast }}"
-          - --port
-          - "{{ k3s_wol_port | string }}"
-          - --count
-          - "{{ k3s_wol_count | string }}"
-          - --interval
-          - "{{ k3s_wol_interval | string }}"
-      loop: "{{ groups.k3s_cluster }}"
-      loop_control:
-        label: "{{ item }}"
-      register: k3s_wol_results
-      changed_when: true
-      failed_when: false
+        argv: [systemctl, is-active, systemd-networkd]
+      changed_when: false
+
+    - name: Verify the existing WOL network profile and interface
+      ansible.builtin.command:
+        argv: [networkctl, status, --no-pager, "{{ k3s_wol_interface }}"]
+      changed_when: false
       no_log: true
+
+    - name: Use the existing WOL network profile temporarily
+      block:
+        - name: Activate the WOL network profile
+          ansible.builtin.command:
+            argv: [networkctl, up, "{{ k3s_wol_interface }}"]
+          become: true
+          changed_when: true
+          async: 120
+          poll: 1
+          no_log: true
+
+        - name: Verify an active WOL interface with a global IPv4 address
+          ansible.builtin.command:
+            argv:
+              - ip
+              - -json
+              - -4
+              - address
+              - show
+              - up
+              - dev
+              - "{{ k3s_wol_interface }}"
+              - scope
+              - global
+          register: k3s_wol_active_address
+          changed_when: false
+          failed_when: >-
+            k3s_wol_active_address.rc != 0
+            or k3s_wol_active_address.stdout | from_json | length != 1
+            or (k3s_wol_active_address.stdout | from_json)[0].addr_info | length == 0
+          no_log: true
+
+        - name: Send Wake-on-LAN to every host before probing SSH
+          ansible.builtin.script:
+            cmd: >-
+              {{ (playbook_dir ~ '/../../scripts/send-wol.py') | quote }}
+              --mac {{ hostvars[item].mac_address | quote }}
+              --broadcast {{ k3s_wol_broadcast | quote }}
+              --port 9
+              --count 3
+              --interval 0.2
+            executable: /usr/bin/python3
+          loop: "{{ groups.k3s_cluster }}"
+          loop_control:
+            label: "{{ item }}"
+          changed_when: true
+          no_log: true
+      always:
+        - name: Deactivate the WOL network profile
+          ansible.builtin.command:
+            argv: [networkctl, down, "{{ k3s_wol_interface }}"]
+          become: true
+          changed_when: true
+          no_log: true
+
+- name: Wait for every K3s SSH endpoint after WOL cleanup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  vars:
+    k3s_ssh_wait_timeout: 300
+  tasks:
+    - name: Validate the SSH recovery timeout
+      ansible.builtin.assert:
+        that:
+          - k3s_ssh_wait_timeout | string is match('^[0-9]+$')
+          - k3s_ssh_wait_timeout | int >= 1
 
     - name: Wait for every SSH port after all Wake-on-LAN attempts
       ansible.builtin.wait_for:
@@ -99,16 +158,15 @@
       register: k3s_ssh_results
       failed_when: false
 
-    - name: Require every Wake-on-LAN send and SSH recovery
+    - name: Require every SSH endpoint to recover
       ansible.builtin.assert:
         that:
-          - k3s_wol_results.results | rejectattr('rc', 'equalto', 0) | list | length == 0
           - >-
             k3s_ssh_results.results
             | selectattr('state', 'defined')
             | selectattr('state', 'equalto', 'started')
             | list | length == groups.k3s_cluster | length
-        fail_msg: At least one Wake-on-LAN send failed or one host did not return.
+        fail_msg: At least one K3s host did not return after Wake-on-LAN.
 
 - name: Verify every recovered K3s server
   hosts: k3s_cluster

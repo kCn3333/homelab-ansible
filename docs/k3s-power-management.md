@@ -13,6 +13,7 @@ The private `static-yaml` inventory must define exactly:
 - two hosts in `workers`;
 - all three, and no other hosts, in the `k3s_cluster` parent;
 - no host shared between `masters` and `workers`;
+- exactly one host in `k3s_wol_gateway`, with no overlap with `k3s_cluster`;
 - `ansible_host` for every host;
 - a unique unicast `mac_address` for every host used by Power On.
 
@@ -25,9 +26,19 @@ credentials remain private Semaphore data.
 
 `cluster/playbooks/power/k3s-power-on.yml` rejects any `--limit`. Its localhost
 play validates the complete inventory and all MAC values without connecting to
-cluster hosts. It calls `cluster/scripts/send-wol.py` for every host, suppresses
-MAC-bearing output, and only after all three attempts waits for every SSH port.
-A failed send or a host that does not return fails the aggregate gate.
+cluster hosts. The separate `k3s_wol_gateway` is reached by SSH through its
+normal management connection; Power On does not assume the Semaphore execution
+environment owns host network interfaces.
+
+Before activation, the gateway play validates its inputs, requires active
+`systemd-networkd`, confirms that the existing profile/interface is known to
+`networkctl`, and runs `networkctl up`. It then requires an active interface
+with a global IPv4 address and uses `/usr/bin/python3` to run
+`cluster/scripts/send-wol.py` for every node.
+
+The activation lifecycle is enclosed in `block`/`always`. Cleanup always runs
+`networkctl down`, including when activation, address validation, or a send
+fails. Only after successful deactivation do SSH waits begin.
 
 After SSH recovery, every host must pass Ansible connectivity and noninteractive
 sudo. Power On then waits first for the K3s service to reach `active`, and next
@@ -37,11 +48,21 @@ met. The master then confirms the exact Node set and that every Node is Ready.
 Power On does not start or restart services, cordon, uncordon, drain, repair the
 cluster, or inspect workloads and platform integrations.
 
-Required private input is `k3s_wol_broadcast`. Optional controls are
-`k3s_wol_port`, `k3s_wol_count`, `k3s_wol_interval`, and
-`k3s_ssh_wait_timeout`. The service and local API/etcd recovery waits use
+Required private gateway inputs are `k3s_wol_interface` and
+`k3s_wol_broadcast`. Power On uses fixed public safety values: a 120-second
+activation timeout, WOL port 9, three packets, and a 0.2-second interval.
+`k3s_ssh_wait_timeout` controls the subsequent SSH wait. Service and local API/etcd recovery waits use
 `k3s_recovery_retries` (default `150`) and `k3s_recovery_delay` (default `2`
 seconds); together their defaults allow about 300 seconds for each stage.
+
+### Gateway network prerequisite
+
+The gateway must already have a Netplan VLAN profile rendered by
+`systemd-networkd`, attached to the correct parent, with `activation-mode: manual`,
+`optional: true`, and DHCP or static addressing managed outside these
+lifecycle playbooks. The profile must not activate automatically at boot.
+Lifecycle automation never edits Netplan. Public examples use placeholders such
+as `<wol-interface>`, `<wol-broadcast-address>`, and `<node-mac>`.
 
 ## Approved Shutdown
 
@@ -51,6 +72,8 @@ seconds); together their defaults allow about 300 seconds for each stage.
 k3s_power_action=shutdown
 k3s_shutdown_confirm=SHUTDOWN_K3S_CLUSTER
 ```
+
+Power Off uses normal IP routing and does not require or contact the WOL gateway.
 
 Before mutation it verifies connectivity, noninteractive sudo, active K3s,
 local API and etcd readiness, exact Ready Node membership, and the Longhorn
