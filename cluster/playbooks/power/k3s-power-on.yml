@@ -117,6 +117,8 @@
   any_errors_fatal: true
   vars:
     k3s_binary_path: /usr/local/bin/k3s
+    k3s_recovery_retries: 150
+    k3s_recovery_delay: 2
   tasks:
     - name: Verify Ansible connectivity
       ansible.builtin.ping:
@@ -127,22 +129,34 @@
       become: true
       changed_when: false
 
-    - name: Require active K3s service
+    - name: Wait for active K3s service
       ansible.builtin.command:
         argv: [systemctl, is-active, k3s]
       become: true
+      register: k3s_service_state
       changed_when: false
+      until:
+        - k3s_service_state.rc == 0
+        - k3s_service_state.stdout | trim == 'active'
+      retries: "{{ k3s_recovery_retries }}"
+      delay: "{{ k3s_recovery_delay }}"
 
-    - name: Require local API and etcd readiness
+    - name: Wait for local API and etcd readiness
       ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - "--raw=/readyz?verbose"
       become: true
       register: k3s_local_readyz
       changed_when: false
-      failed_when: >-
-        k3s_local_readyz.rc != 0
-        or 'readyz check passed' not in k3s_local_readyz.stdout
-        or '[+]etcd ok' not in k3s_local_readyz.stdout
+      until:
+        - k3s_local_readyz.rc == 0
+        - "'readyz check passed' in k3s_local_readyz.stdout"
+        - "'[+]etcd ok' in k3s_local_readyz.stdout"
+      retries: "{{ k3s_recovery_retries }}"
+      delay: "{{ k3s_recovery_delay }}"
 
 - name: Verify the exact Kubernetes Node set from the master
   hosts: masters
