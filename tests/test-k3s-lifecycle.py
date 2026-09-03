@@ -24,6 +24,10 @@ def task_names(play: dict) -> list[str]:
     return [task["name"] for task in play.get("tasks", [])]
 
 
+def named_task(play: dict, name: str) -> dict:
+    return next(task for task in play.get("tasks", []) if task["name"] == name)
+
+
 class PowerOnTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -49,6 +53,42 @@ class PowerOnTests(unittest.TestCase):
         gate = self.plays[0]["tasks"][final_gate]["ansible.builtin.assert"]["that"]
         self.assertIn("selectattr('state', 'equalto', 'started')", "\n".join(gate))
         self.assertNotIn("selectattr('failed'", "\n".join(gate))
+
+    def test_recovery_waits_for_service_api_and_etcd(self) -> None:
+        recovered = self.plays[1]
+        self.assertTrue(recovered["any_errors_fatal"])
+        self.assertEqual(150, recovered["vars"]["k3s_recovery_retries"])
+        self.assertEqual(2, recovered["vars"]["k3s_recovery_delay"])
+
+        service = named_task(recovered, "Wait for active K3s service")
+        self.assertEqual("k3s_service_state", service["register"])
+        self.assertEqual("{{ k3s_recovery_retries }}", service["retries"])
+        self.assertEqual("{{ k3s_recovery_delay }}", service["delay"])
+        service_until = "\n".join(service["until"])
+        self.assertIn("k3s_service_state.rc == 0", service_until)
+        self.assertIn("k3s_service_state.stdout | trim == 'active'", service_until)
+
+        readyz = named_task(recovered, "Wait for local API and etcd readiness")
+        self.assertEqual("k3s_local_readyz", readyz["register"])
+        self.assertEqual("{{ k3s_recovery_retries }}", readyz["retries"])
+        self.assertEqual("{{ k3s_recovery_delay }}", readyz["delay"])
+        readyz_until = "\n".join(readyz["until"])
+        for required in ("k3s_local_readyz.rc == 0", "readyz check passed", "[+]etcd ok"):
+            self.assertIn(required, readyz_until)
+
+    def test_power_on_observes_without_service_repair_or_fixed_sleep(self) -> None:
+        for play in self.plays[1:]:
+            self.assertTrue(play["any_errors_fatal"])
+        commands = [
+            task["ansible.builtin.command"]["argv"]
+            for play in self.plays
+            for task in play.get("tasks", [])
+            if "ansible.builtin.command" in task
+        ]
+        flattened = [" ".join(map(str, argv)).lower() for argv in commands]
+        self.assertFalse(any(command == "sleep" or command.startswith("sleep ") for command in flattened))
+        self.assertFalse(any("systemctl start" in command for command in flattened))
+        self.assertFalse(any("systemctl restart" in command for command in flattened))
 
     def test_node_names_use_one_column_output(self) -> None:
         self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)

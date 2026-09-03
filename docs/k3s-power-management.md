@@ -29,14 +29,19 @@ cluster hosts. It calls `cluster/scripts/send-wol.py` for every host, suppresses
 MAC-bearing output, and only after all three attempts waits for every SSH port.
 A failed send or a host that does not return fails the aggregate gate.
 
-Recovered hosts must pass Ansible connectivity, noninteractive sudo, active
-K3s, and local API readiness including `[+]etcd ok`. The master then confirms
-the exact Node set and that every Node is Ready. Power On does not cordon,
-uncordon, drain, repair services, or inspect workloads and platform integrations.
+After SSH recovery, every host must pass Ansible connectivity and noninteractive
+sudo. Power On then waits first for the K3s service to reach `active`, and next
+for the local API readiness response including `[+]etcd ok`. Each stage uses a
+bounded retry window and continues immediately when its readiness conditions are
+met. The master then confirms the exact Node set and that every Node is Ready.
+Power On does not start or restart services, cordon, uncordon, drain, repair the
+cluster, or inspect workloads and platform integrations.
 
 Required private input is `k3s_wol_broadcast`. Optional controls are
 `k3s_wol_port`, `k3s_wol_count`, `k3s_wol_interval`, and
-`k3s_ssh_wait_timeout`.
+`k3s_ssh_wait_timeout`. The service and local API/etcd recovery waits use
+`k3s_recovery_retries` (default `150`) and `k3s_recovery_delay` (default `2`
+seconds); together their defaults allow about 300 seconds for each stage.
 
 ## Approved Shutdown
 
