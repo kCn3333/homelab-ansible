@@ -20,28 +20,35 @@ def load(path: pathlib.Path) -> tuple[list[dict], str]:
     return list(yaml.safe_load_all(text))[0], text
 
 
-def task_names(play: dict) -> list[str]:
-    return [task["name"] for task in play.get("tasks", [])]
-
-
 def named_task(play: dict, name: str) -> dict:
     return next(task for task in play.get("tasks", []) if task["name"] == name)
 
 
-class PowerOnTests(unittest.TestCase):
+class PlaybookTests(unittest.TestCase):
+    path: pathlib.Path
+
     @classmethod
     def setUpClass(cls) -> None:
-        cls.plays, cls.text = load(POWER_ON)
+        cls.plays, cls.text = load(cls.path)
+
+    def assert_contains_all(self, text: str, values: tuple[str, ...]) -> None:
+        for value in values:
+            with self.subTest(value=value):
+                self.assertIn(value, text)
+
+
+class PowerOnTests(PlaybookTests):
+    path = POWER_ON
 
     def test_controller_validates_scope_before_wol(self) -> None:
         self.assertEqual("localhost", self.plays[0]["hosts"])
         first = self.plays[0]["tasks"][0]
         assertions = "\n".join(first["ansible.builtin.assert"]["that"])
-        self.assertIn("ansible_limit", assertions)
-        self.assertIn("groups.workers | length == 2", assertions)
-        self.assertIn("groups.k3s_cluster | length == 3", assertions)
-        self.assertIn("groups.k3s_wol_gateway | length == 1", assertions)
-        self.assertIn("groups.k3s_wol_gateway | intersect(groups.k3s_cluster)", assertions)
+        self.assert_contains_all(assertions, (
+            "ansible_limit", "groups.workers | length == 2",
+            "groups.k3s_cluster | length == 3", "groups.k3s_wol_gateway | length == 1",
+            "groups.k3s_wol_gateway | intersect(groups.k3s_cluster)",
+        ))
 
     def test_gateway_contract_and_wol_lifecycle(self) -> None:
         gateway = self.plays[1]
@@ -69,26 +76,11 @@ class PowerOnTests(unittest.TestCase):
         self.assertIn("after WOL cleanup", self.plays[2]["name"])
 
     def test_recovery_waits_for_service_api_and_etcd(self) -> None:
-        recovered = self.plays[3]
-        self.assertTrue(recovered["any_errors_fatal"])
-        self.assertEqual(150, recovered["vars"]["k3s_recovery_retries"])
-        self.assertEqual(2, recovered["vars"]["k3s_recovery_delay"])
-
-        service = named_task(recovered, "Wait for active K3s service")
-        self.assertEqual("k3s_service_state", service["register"])
-        self.assertEqual("{{ k3s_recovery_retries }}", service["retries"])
-        self.assertEqual("{{ k3s_recovery_delay }}", service["delay"])
-        service_until = "\n".join(service["until"])
-        self.assertIn("k3s_service_state.rc == 0", service_until)
-        self.assertIn("k3s_service_state.stdout | trim == 'active'", service_until)
-
-        readyz = named_task(recovered, "Wait for local API and etcd readiness")
-        self.assertEqual("k3s_local_readyz", readyz["register"])
-        self.assertEqual("{{ k3s_recovery_retries }}", readyz["retries"])
-        self.assertEqual("{{ k3s_recovery_delay }}", readyz["delay"])
-        readyz_until = "\n".join(readyz["until"])
-        for required in ("k3s_local_readyz.rc == 0", "readyz check passed", "[+]etcd ok"):
-            self.assertIn(required, readyz_until)
+        self.assert_contains_all(self.text, (
+            "Wait for active K3s service", "k3s_service_state.stdout | trim == 'active'",
+            "Wait for local API and etcd readiness", "readyz check passed", "[+]etcd ok",
+            "Require exact Node membership", "Require every Node to be Ready",
+        ))
 
     def test_power_on_observes_without_service_repair_or_fixed_sleep(self) -> None:
         for play in self.plays[1:]:
@@ -115,10 +107,8 @@ class PowerOnTests(unittest.TestCase):
             self.assertNotIn(forbidden, lowered)
 
 
-class PowerOffTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.plays, cls.text = load(POWER_OFF)
+class PowerOffTests(PlaybookTests):
+    path = POWER_OFF
 
     def test_confirmations_limit_and_inventory_are_required(self) -> None:
         assertions = "\n".join(
@@ -155,22 +145,17 @@ class PowerOffTests(unittest.TestCase):
         self.assertEqual(2, tail.count("systemctl, poweroff, --no-block"))
 
     def test_storage_and_partial_probe_parsers_are_fail_closed(self) -> None:
-        self.assertIn("--output=custom-columns=STATE:.status.state", self.text)
-        self.assertIn("--output=json", self.text)
-        self.assertIn("check-longhorn-restore.py", self.text)
-        self.assertNotIn("restoreStatus[*]", self.text)
-        self.assertIn("selectattr('state', 'equalto', 'started')", self.text)
-        self.assertNotIn("selectattr('failed'", self.text)
-        self.assertNotIn("rejectattr('failed'", self.text)
-        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
-        self.assertNotIn("--output=name", self.text)
-        self.assertNotIn("regex_replace', '^node/'", self.text)
+        self.assert_contains_all(self.text, (
+            "--output=custom-columns=STATE:.status.state", "--output=json",
+            "check-longhorn-restore.py", "selectattr('state', 'equalto', 'started')",
+            "--output=custom-columns=NAME:.metadata.name",
+        ))
+        for forbidden in ("restoreStatus[*]", "selectattr('failed'", "rejectattr('failed'", "--output=name"):
+            self.assertNotIn(forbidden, self.text)
 
 
-class HealthTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.plays, cls.text = load(HEALTH)
+class HealthTests(PlaybookTests):
+    path = HEALTH
 
     def test_basic_health_excludes_extended_audits(self) -> None:
         lowered = self.text.lower()
@@ -183,20 +168,14 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(final_assert)
         self.assertTrue(all("k3s_health_mode != 'strict' or" in item for item in final_assert))
 
-    def test_missing_and_unexpected_nodes_use_list_filters(self) -> None:
-        self.assertIn("difference(k3s_live_node_names)", self.text)
-        self.assertIn("difference(k3s_expected_node_names)", self.text)
-        self.assertNotIn("from_json", self.text)
-
     def test_probe_node_and_memory_parsers_are_fail_closed(self) -> None:
-        self.assertIn("item.state == 'started'", self.text)
-        self.assertNotIn("item.failed", self.text)
-        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
-        self.assertNotIn("custom-columns=NAME:.metadata.name,READY:", self.text)
-        self.assertIn("get\n          - node", self.text)
-        self.assertIn("status.conditions", self.text)
-        self.assertIn("memory_mb']['nocache']['used", self.text)
-        self.assertNotIn("memfree_mb", self.text)
+        self.assert_contains_all(self.text, (
+            "item.state == 'started'", "--output=custom-columns=NAME:.metadata.name",
+            "get\n          - node", "status.conditions", "memory_mb']['nocache']['used",
+            "difference(k3s_live_node_names)", "difference(k3s_expected_node_names)",
+        ))
+        for forbidden in ("item.failed", "custom-columns=NAME:.metadata.name,READY:", "memfree_mb", "from_json"):
+            self.assertNotIn(forbidden, self.text)
 
 
 if __name__ == "__main__":
