@@ -3,7 +3,8 @@
 ## Separation boundary
 
 `cluster/` contains reusable playbooks that target the abstract
-`k3s_servers` group. `homelab/` contains reusable playbooks for the separate
+`k3s_servers`, `k3s_cluster`, and `k3s_wol_gateway` groups. `homelab/` contains
+reusable playbooks for the separate
 non-cluster inventory and target the abstract `homelab_managed` group. A
 Semaphore task template must always select one of these inventory scopes
 explicitly.
@@ -22,6 +23,9 @@ in Semaphore.
 - Credentials and sensitive variables are not stored in Git.
 - Mutating automation requires separate design, narrow groups, explicit
   controls, and validation against the private environment.
+- The Power On network mutation is limited to temporary activation of an
+  externally managed Netplan VLAN profile on the single explicit WOL gateway.
+  It is deactivated and verified before SSH waits.
 
 ## Public/private boundary
 

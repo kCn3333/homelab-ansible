@@ -89,6 +89,9 @@ jobs:
                 ansible_connection: local
                 ansible_host: 192.0.2.12
                 mac_address: "02:00:00:00:00:03"
+              gateway1:
+                ansible_connection: local
+                ansible_host: 192.0.2.13
             children:
               masters:
                 hosts:
@@ -101,6 +104,9 @@ jobs:
                 children:
                   masters:
                   workers:
+              k3s_wol_gateway:
+                hosts:
+                  gateway1:
               k3s_servers:
                 children:
                   k3s_cluster:

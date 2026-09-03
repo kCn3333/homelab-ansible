@@ -9,13 +9,16 @@ existing K3s cluster. It does not include inventory or cluster installation.
 - `masters`: exactly one operationally last node for the new lifecycle workflows;
 - `workers`: exactly two nodes processed before `masters` for shutdown;
 - `k3s_cluster`: a children group containing exactly `masters` and `workers`.
+- `k3s_wol_gateway`: exactly one non-cluster host that sends Wake-on-LAN from a
+  temporarily activated, externally configured VLAN interface.
 
 Every member of `k3s_cluster` is treated as a K3s server/control-plane member
 with embedded etcd. Group names define operational order only; `workers` does
 not imply K3s agent-only nodes.
 
 Semaphore private `static-yaml` inventory supplies connection settings and a
-unique unicast `mac_address` for Power On. Inventory aliases match Kubernetes
+unique unicast `mac_address` for each cluster node. The WOL gateway supplies
+`k3s_wol_interface` and `k3s_wol_broadcast`. Inventory aliases match Kubernetes
 Node names. No concrete private values belong in this repository.
 
 ## Playbooks
@@ -24,12 +27,14 @@ Node names. No concrete private values belong in this repository.
   migration of this playbook is intentionally deferred.
 - `playbooks/audit/k3s-health.yml`: basic read-only host and Node health in
   `report` or `strict` mode; extended audits are separate future playbooks.
-- `playbooks/power/k3s-power-on.yml`: validates inventory, sends WoL to every
-  node, then verifies host, API, etcd, and exact Ready Node state without
-  changing scheduling.
+- `playbooks/power/k3s-power-on.yml`: validates inventory, temporarily activates
+  the existing WOL VLAN on the explicit gateway, sends WoL to every node, deactivates it,
+  then verifies host, API, etcd, and exact Ready Node state without changing
+  scheduling.
 - `playbooks/power/k3s-power-off.yml`: requires full-cluster scope and two
   confirmations, checks exact Ready Nodes plus active Longhorn backup/restore
-  safety, then requests poweroff for `workers` sequentially and `masters` last.
+  safety, then requests poweroff for `workers` sequentially and `masters` last;
+  it does not use the WOL gateway.
 
 The helper `scripts/send-wol.py` uses only Python's standard library and never
 discovers addresses. See [`docs/k3s-power-management.md`](../docs/k3s-power-management.md)

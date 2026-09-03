@@ -20,7 +20,8 @@ repository checkout.
 Create and maintain real inventories directly in Semaphore using the
 `static-yaml` inventory type. Do not synchronize them back into Git. The K3s
 inventory must retain `k3s_servers` for the legacy connectivity audit and
-provide `masters`, `workers`, and their `k3s_cluster` parent for lifecycle work;
+provide `masters`, `workers`, their `k3s_cluster` parent, and exactly one
+separate host in `k3s_wol_gateway` for lifecycle work;
 the Homelab Maintenance inventory must
 provide `homelab_managed` and may use the other abstract groups documented in
 `homelab/README.md`.
@@ -48,11 +49,19 @@ The K3s project may expose three deliberately ordered templates:
 - `K3S | 20 Health Check`;
 - `K3S | 30 Approved Shutdown`.
 
-Power On requires private inventory MAC values plus reviewed WoL broadcast,
-optional port and timeout controls, and no Semaphore limit.
+Power On requires private inventory MAC values plus `k3s_wol_interface` and
+`k3s_wol_broadcast` on the gateway. The gateway must be reached over its normal
+management connection; only `networkctl up` and
+`networkctl down` use privilege escalation. The template must not define a
+Semaphore limit.
+
+The gateway requires an existing manual-activation Netplan VLAN profile backed
+by `systemd-networkd`. Lifecycle playbooks neither edit Netplan nor create or
+remove interfaces, and confirmed cleanup precedes all cluster SSH waits.
 Approved Shutdown requires both
 `k3s_power_action=shutdown` and
 `k3s_shutdown_confirm=SHUTDOWN_K3S_CLUSTER`. It neither cordons nor drains.
+It does not use or contact the WOL gateway.
 Template details and additional controls are in
 [`k3s-power-management.md`](k3s-power-management.md). Do not schedule shutdown
 automatically.

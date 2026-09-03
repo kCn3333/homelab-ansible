@@ -40,22 +40,36 @@ class PowerOnTests(unittest.TestCase):
         self.assertIn("ansible_limit", assertions)
         self.assertIn("groups.workers | length == 2", assertions)
         self.assertIn("groups.k3s_cluster | length == 3", assertions)
+        self.assertIn("groups.k3s_wol_gateway | length == 1", assertions)
+        self.assertIn("groups.k3s_wol_gateway | intersect(groups.k3s_cluster)", assertions)
 
-    def test_all_wol_attempts_precede_all_ssh_waits(self) -> None:
-        names = task_names(self.plays[0])
+    def test_gateway_contract_and_wol_lifecycle(self) -> None:
+        gateway = self.plays[1]
+        self.assertEqual("k3s_wol_gateway", gateway["hosts"])
+        settings = named_task(gateway, "Require private WOL gateway network variables")
+        assertions = "\n".join(settings["ansible.builtin.assert"]["that"])
+        for required in ("k3s_wol_interface is defined", "k3s_wol_broadcast is defined"):
+            self.assertIn(required, assertions)
+        lifecycle = named_task(gateway, "Use the existing WOL network profile temporarily")
+        names = [task["name"] for task in lifecycle["block"]]
+        activate = names.index("Activate the WOL network profile")
         send = names.index("Send Wake-on-LAN to every host before probing SSH")
-        wait = names.index("Wait for every SSH port after all Wake-on-LAN attempts")
-        final_gate = names.index("Require every Wake-on-LAN send and SSH recovery")
-        self.assertLess(send, wait)
-        self.assertLess(wait, final_gate)
-        self.assertFalse(self.plays[0]["tasks"][send]["failed_when"])
-        self.assertTrue(self.plays[0]["tasks"][send]["no_log"])
-        gate = self.plays[0]["tasks"][final_gate]["ansible.builtin.assert"]["that"]
-        self.assertIn("selectattr('state', 'equalto', 'started')", "\n".join(gate))
-        self.assertNotIn("selectattr('failed'", "\n".join(gate))
+        self.assertLess(activate, send)
+        self.assertEqual(120, lifecycle["block"][activate]["async"])
+        send_task = lifecycle["block"][send]
+        self.assertEqual("{{ groups.k3s_cluster }}", send_task["loop"])
+        self.assertTrue(send_task["no_log"])
+        cleanup = lifecycle["always"][0]
+        self.assertEqual(
+            ["networkctl", "down", "{{ k3s_wol_interface }}"],
+            cleanup["ansible.builtin.command"]["argv"],
+        )
+        self.assertNotIn("failed_when", cleanup)
+        self.assertEqual("localhost", self.plays[2]["hosts"])
+        self.assertIn("after WOL cleanup", self.plays[2]["name"])
 
     def test_recovery_waits_for_service_api_and_etcd(self) -> None:
-        recovered = self.plays[1]
+        recovered = self.plays[3]
         self.assertTrue(recovered["any_errors_fatal"])
         self.assertEqual(150, recovered["vars"]["k3s_recovery_retries"])
         self.assertEqual(2, recovered["vars"]["k3s_recovery_delay"])
@@ -79,16 +93,16 @@ class PowerOnTests(unittest.TestCase):
     def test_power_on_observes_without_service_repair_or_fixed_sleep(self) -> None:
         for play in self.plays[1:]:
             self.assertTrue(play["any_errors_fatal"])
-        commands = [
-            task["ansible.builtin.command"]["argv"]
-            for play in self.plays
-            for task in play.get("tasks", [])
-            if "ansible.builtin.command" in task
-        ]
-        flattened = [" ".join(map(str, argv)).lower() for argv in commands]
-        self.assertFalse(any(command == "sleep" or command.startswith("sleep ") for command in flattened))
-        self.assertFalse(any("systemctl start" in command for command in flattened))
-        self.assertFalse(any("systemctl restart" in command for command in flattened))
+        lowered = self.text.lower()
+        self.assertNotIn("ansible.builtin.shell", lowered)
+        self.assertNotIn("argv: [sleep", lowered)
+        self.assertNotRegex(lowered, r"(?m)^\s+- sleep(?:\s|$)")
+        self.assertNotIn("systemctl start", lowered)
+        self.assertNotIn("systemctl restart", lowered)
+        for private_value in ("192.168.", "vlan5-wol", "ens18", "ens19", "logos"):
+            self.assertNotIn(private_value, lowered)
+        for forbidden in ("ip link add", "ip address add", "ip link delete"):
+            self.assertNotIn(forbidden, lowered)
 
     def test_node_names_use_one_column_output(self) -> None:
         self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
@@ -118,6 +132,8 @@ class PowerOffTests(unittest.TestCase):
         self.assertEqual(["k3s_cluster", "masters", "workers", "masters"], [play["hosts"] for play in self.plays])
         self.assertEqual(1, self.plays[2]["serial"])
         self.assertEqual("inventory", self.plays[2]["order"])
+        self.assertNotIn("k3s_wol_", self.text)
+        self.assertNotIn("networkctl", self.text)
 
     def test_poweroff_wait_boundary_is_linear(self) -> None:
         for play in self.plays[2:]:
