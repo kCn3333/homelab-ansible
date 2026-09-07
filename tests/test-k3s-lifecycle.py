@@ -75,6 +75,26 @@ class PowerOnTests(PlaybookTests):
         self.assertEqual("localhost", self.plays[2]["hosts"])
         self.assertIn("after WOL cleanup", self.plays[2]["name"])
 
+    def test_wol_address_wait_retries_before_send(self) -> None:
+        lifecycle = named_task(self.plays[1], "Use the existing WOL network profile temporarily")
+        block = lifecycle["block"]
+        names = [task["name"] for task in block]
+        wait = names.index("Wait for an active WOL interface with a global IPv4 address")
+        self.assertLess(names.index("Activate the WOL network profile"), wait)
+        self.assertLess(wait, names.index("Send Wake-on-LAN to every host before probing SSH"))
+        task = block[wait]
+        self.assertEqual(
+            "k3s_wol_active_address.rc == 0 "
+            "and k3s_wol_active_address.stdout | from_json | length == 1 "
+            "and (k3s_wol_active_address.stdout | from_json)[0].addr_info | length > 0",
+            task["until"],
+        )
+        self.assertEqual(30, task["retries"])
+        self.assertEqual(2, task["delay"])
+        self.assertNotIn("failed_when", task)
+        self.assertTrue(task["no_log"])
+        self.assertFalse(task["changed_when"])
+
     def test_recovery_waits_for_service_api_and_etcd(self) -> None:
         self.assert_contains_all(self.text, (
             "Wait for active K3s service", "k3s_service_state.stdout | trim == 'active'",

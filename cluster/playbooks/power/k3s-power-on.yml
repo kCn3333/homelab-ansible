@@ -85,7 +85,7 @@
           poll: 1
           no_log: true
 
-        - name: Verify an active WOL interface with a global IPv4 address
+        - name: Wait for an active WOL interface with a global IPv4 address
           ansible.builtin.command:
             argv:
               - ip
@@ -100,10 +100,12 @@
               - global
           register: k3s_wol_active_address
           changed_when: false
-          failed_when: >-
-            k3s_wol_active_address.rc != 0
-            or k3s_wol_active_address.stdout | from_json | length != 1
-            or (k3s_wol_active_address.stdout | from_json)[0].addr_info | length == 0
+          until: >-
+            k3s_wol_active_address.rc == 0
+            and k3s_wol_active_address.stdout | from_json | length == 1
+            and (k3s_wol_active_address.stdout | from_json)[0].addr_info | length > 0
+          retries: 30
+          delay: 2
           no_log: true
 
         - name: Send Wake-on-LAN to every host before probing SSH

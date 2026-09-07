@@ -33,7 +33,9 @@ environment owns host network interfaces.
 Before activation, the gateway play validates its inputs, requires active
 `systemd-networkd`, confirms that the existing profile/interface is known to
 `networkctl`, and runs `networkctl up`. It then requires an active interface
-with a global IPv4 address and uses `/usr/bin/python3` to run
+with a global IPv4 address, retrying every 2 seconds up to 30 times (up to
+approximately 60 seconds of waiting), and continues as soon as the address is
+available. It then uses `/usr/bin/python3` to run
 `cluster/scripts/send-wol.py` for every node.
 
 The activation lifecycle is enclosed in `block`/`always`. Cleanup always runs
