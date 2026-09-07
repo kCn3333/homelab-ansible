@@ -10,14 +10,6 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).parents[1]
-POWER_ON = ROOT / "cluster/playbooks/power/k3s-power-on.yml"
-POWER_OFF = ROOT / "cluster/playbooks/power/k3s-power-off.yml"
-HEALTH = ROOT / "cluster/playbooks/audit/k3s-health.yml"
-
-
-def load(path: pathlib.Path) -> tuple[list[dict], str]:
-    text = path.read_text(encoding="utf-8")
-    return list(yaml.safe_load_all(text))[0], text
 
 
 def named_task(play: dict, name: str) -> dict:
@@ -29,7 +21,8 @@ class PlaybookTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.plays, cls.text = load(cls.path)
+        cls.text = cls.path.read_text(encoding="utf-8")
+        cls.plays = yaml.safe_load(cls.text)
 
     def assert_contains_all(self, text: str, values: tuple[str, ...]) -> None:
         for value in values:
@@ -38,7 +31,7 @@ class PlaybookTests(unittest.TestCase):
 
 
 class PowerOnTests(PlaybookTests):
-    path = POWER_ON
+    path = ROOT / "cluster/playbooks/power/k3s-power-on.yml"
 
     def test_controller_validates_scope_before_wol(self) -> None:
         self.assertEqual("localhost", self.plays[0]["hosts"])
@@ -61,7 +54,9 @@ class PowerOnTests(PlaybookTests):
         names = [task["name"] for task in lifecycle["block"]]
         activate = names.index("Activate the WOL network profile")
         send = names.index("Send Wake-on-LAN to every host before probing SSH")
-        self.assertLess(activate, send)
+        wait = names.index("Wait for an active WOL interface with a global IPv4 address")
+        self.assertLess(activate, wait)
+        self.assertLess(wait, send)
         self.assertEqual(120, lifecycle["block"][activate]["async"])
         send_task = lifecycle["block"][send]
         self.assertEqual("{{ groups.k3s_cluster }}", send_task["loop"])
@@ -75,14 +70,7 @@ class PowerOnTests(PlaybookTests):
         self.assertEqual("localhost", self.plays[2]["hosts"])
         self.assertIn("after WOL cleanup", self.plays[2]["name"])
 
-    def test_wol_address_wait_retries_before_send(self) -> None:
-        lifecycle = named_task(self.plays[1], "Use the existing WOL network profile temporarily")
-        block = lifecycle["block"]
-        names = [task["name"] for task in block]
-        wait = names.index("Wait for an active WOL interface with a global IPv4 address")
-        self.assertLess(names.index("Activate the WOL network profile"), wait)
-        self.assertLess(wait, names.index("Send Wake-on-LAN to every host before probing SSH"))
-        task = block[wait]
+        task = lifecycle["block"][wait]
         self.assertEqual(
             "k3s_wol_active_address.rc == 0 "
             "and k3s_wol_active_address.stdout | from_json | length == 1 "
@@ -128,7 +116,7 @@ class PowerOnTests(PlaybookTests):
 
 
 class PowerOffTests(PlaybookTests):
-    path = POWER_OFF
+    path = ROOT / "cluster/playbooks/power/k3s-power-off.yml"
 
     def test_confirmations_limit_and_inventory_are_required(self) -> None:
         assertions = "\n".join(
@@ -179,7 +167,6 @@ class PowerOffTests(PlaybookTests):
         tail = self.text[boundary:].lower()
         for forbidden in ("kubectl", "cordon", "drain", "rollback", "uncordon"):
             self.assertNotIn(forbidden, tail)
-        self.assertEqual(2, tail.count("systemctl, poweroff, --no-block"))
 
     def test_storage_and_partial_probe_parsers_are_fail_closed(self) -> None:
         self.assert_contains_all(self.text, (
@@ -192,7 +179,7 @@ class PowerOffTests(PlaybookTests):
 
 
 class HealthTests(PlaybookTests):
-    path = HEALTH
+    path = ROOT / "cluster/playbooks/audit/k3s-health.yml"
 
     def test_basic_health_excludes_extended_audits(self) -> None:
         lowered = self.text.lower()

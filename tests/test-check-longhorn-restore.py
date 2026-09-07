@@ -20,10 +20,10 @@ def engine(restore_status=...):
     return {"status": status}
 
 
-def run_document(document: object) -> subprocess.CompletedProcess[str]:
+def run_document(document: object, *, raw: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
-        input=json.dumps(document),
+        input=document if raw else json.dumps(document),
         text=True,
         capture_output=True,
         check=False,
@@ -62,23 +62,14 @@ class LonghornRestoreParserTests(unittest.TestCase):
             with self.subTest(engines=engines, entries=entries):
                 self.assert_safe(document, engines, entries)
 
-    def test_active_restore_is_blocked_without_leaking_identifiers(self) -> None:
-        sensitive = "private-replica-address"
-        result = run_document(
-            {"items": [engine({sensitive: {"isRestoring": True, "error": ""}})]}
+    def test_restore_failures_are_blocked_without_leaking_content(self) -> None:
+        cases = (
+            ({"private-replica-address": {"isRestoring": True, "error": ""}}, "active-restore"),
+            ({"replica-a": {"isRestoring": False, "error": "private restore failure details"}}, "restore-error"),
         )
-        self.assertNotEqual(0, result.returncode)
-        self.assertEqual("LONGHORN_RESTORE_ERROR category=active-restore\n", result.stderr)
-        self.assertNotIn(sensitive, result.stdout + result.stderr)
-
-    def test_nonempty_restore_error_is_blocked_without_leaking_content(self) -> None:
-        sensitive = "private restore failure details"
-        result = run_document(
-            {"items": [engine({"replica-a": {"isRestoring": False, "error": sensitive}})]}
-        )
-        self.assertNotEqual(0, result.returncode)
-        self.assertEqual("LONGHORN_RESTORE_ERROR category=restore-error\n", result.stderr)
-        self.assertNotIn(sensitive, result.stdout + result.stderr)
+        for status, category in cases:
+            with self.subTest(category=category):
+                self.assert_blocked({"items": [engine(status)]}, category)
 
     def test_invalid_documents_are_blocked(self) -> None:
         cases = (
@@ -97,13 +88,7 @@ class LonghornRestoreParserTests(unittest.TestCase):
                 self.assert_blocked(document, category)
 
     def test_invalid_json_is_blocked(self) -> None:
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            input="not-json",
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        result = run_document("not-json", raw=True)
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("", result.stdout)
         self.assertEqual("LONGHORN_RESTORE_ERROR category=invalid-json\n", result.stderr)

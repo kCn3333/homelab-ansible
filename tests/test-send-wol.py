@@ -67,13 +67,9 @@ class WakeOnLanTests(unittest.TestCase):
             send_wol.build_magic_packet("02-11-22-33-44-55"),
         )
 
-    def test_invalid_and_mixed_separator_macs_are_rejected(self) -> None:
-        for value in ("invalid", "02:11:22:33:44", "02:11-22:33:44:55"):
-            with self.subTest(value=value), self.assertRaises(send_wol.ValidationError):
-                send_wol.build_magic_packet(value)
-
-    def test_multicast_and_broadcast_macs_are_rejected(self) -> None:
-        for value in ("01:00:5e:00:00:01", "ff:ff:ff:ff:ff:ff"):
+    def test_invalid_macs_are_rejected(self) -> None:
+        for value in ("invalid", "02:11:22:33:44", "02:11-22:33:44:55",
+                      "01:00:5e:00:00:01", "ff:ff:ff:ff:ff:ff"):
             with self.subTest(value=value), self.assertRaises(send_wol.ValidationError):
                 send_wol.build_magic_packet(value)
 
@@ -99,15 +95,7 @@ class WakeOnLanTests(unittest.TestCase):
             created.append(instance)
             return instance
 
-        result = send_wol.send_magic_packets(
-            "02:11:22:33:44:55",
-            "192.0.2.255",
-            9,
-            4,
-            0.25,
-            socket_factory=factory,
-            sleep=sleeps.append,
-        )
+        result = self.send(count=4, interval=0.25, socket_factory=factory, sleep=sleeps.append)
 
         self.assertEqual(4, result)
         self.assertEqual(1, len(created))
