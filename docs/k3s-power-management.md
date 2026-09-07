@@ -86,12 +86,24 @@ explicit review; the result is then reported as `NOT_CHECKED`.
 
 There is no cordon, drain, rollback, restart, or automatic repair. Workers are
 processed sequentially in inventory order, followed by the master. Each host
-receives `systemctl poweroff --no-block`, then the controller waits for its SSH
-port to stop responding before continuing.
+receives `systemd-run --quiet --collect --on-active=2s systemctl poweroff --no-block`
+through `command` with `argv`. The systemd timer delays poweroff by two seconds
+so the scheduling command can return before SSH closes; no shell or fixed sleep
+is used. The registered result must confirm `rc == 0` and must not indicate
+`unreachable`. A local assertion (without privilege escalation) checks this
+immediately before the existing local wait for the SSH port to stop responding.
+
+Only the scheduling task uses `ignore_unreachable: true`, allowing the local
+assertion to route an unconfirmed result into the existing diagnostic `rescue`.
+A missing return code, unreachable result, or command failure stops the procedure
+before the next host. SSH loss alone never confirms that poweroff was accepted.
+The delay is not a guarantee of result delivery: if the controller does not
+receive confirmation in time, shutdown stops fail-closed.
 
 The comment marking the safety boundary is also an architectural rule: after
 the first poweroff can be requested, no Kubernetes API query is allowed. Only
-the next poweroff request and local TCP observation may follow. A successful
+the next poweroff request, local result confirmation, and local TCP observation
+may follow. A successful
 probe is reported as `SSH_NOT_RESPONDING`; that observation does not prove
 physical power-off. If a step fails after shutdown begins, the report identifies
 the stage and host, then separates SSH-responsive hosts from hosts that are not

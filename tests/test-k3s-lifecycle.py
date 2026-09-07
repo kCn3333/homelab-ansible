@@ -148,14 +148,31 @@ class PowerOffTests(PlaybookTests):
     def test_poweroff_wait_boundary_is_linear(self) -> None:
         for play in self.plays[2:]:
             block = play["tasks"][0]["block"]
-            names = [task["name"] for task in block]
-            self.assertLess(
-                names.index("Request nonblocking system poweroff"),
-                names.index("Wait locally until SSH stops responding"),
+            schedule, confirm, wait = block[:3]
+            self.assertEqual(
+                ["systemd-run", "--quiet", "--collect", "--on-active=2s",
+                 "systemctl", "poweroff", "--no-block"],
+                schedule["ansible.builtin.command"]["argv"],
             )
-            command = block[0]["ansible.builtin.command"]["argv"]
-            self.assertEqual(["systemctl", "poweroff", "--no-block"], command)
+            self.assertEqual("k3s_poweroff_schedule", schedule["register"])
+            self.assertIs(schedule["ignore_unreachable"], True)
+            self.assertNotIn("failed_when", schedule)
+            self.assertEqual([
+                "not (k3s_poweroff_schedule.unreachable | default(false) | bool)",
+                "k3s_poweroff_schedule.rc | default(-1) == 0",
+            ], confirm["ansible.builtin.assert"]["that"])
+            for local_task in (confirm, wait):
+                self.assertEqual("localhost", local_task["delegate_to"])
+                self.assertIs(local_task["become"], False)
+                self.assertNotIn("failed_when", local_task)
+            self.assertEqual("stopped", wait["ansible.builtin.wait_for"]["state"])
             self.assertTrue(play["any_errors_fatal"])
+            self.assertIn("ansible.builtin.fail", play["tasks"][0]["rescue"][-1])
+        self.assertEqual(2, self.text.count("ignore_unreachable:"))
+        self.assertNotIn("ignore_errors", self.text)
+        self.assertNotIn("ansible.builtin.shell", self.text)
+        self.assertNotIn("ansible.builtin.pause", self.text)
+        self.assertNotIn("argv: [sleep", self.text)
 
     def test_no_api_or_rollback_after_first_poweroff(self) -> None:
         boundary = self.text.index("# Safety boundary:")

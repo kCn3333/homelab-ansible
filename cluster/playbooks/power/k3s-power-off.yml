@@ -175,10 +175,21 @@
   tasks:
     - name: Request worker poweroff and require SSH closure
       block:
-        - name: Request nonblocking system poweroff
+        - name: Schedule delayed system poweroff
           ansible.builtin.command:
-            argv: [systemctl, poweroff, --no-block]
+            argv: [systemd-run, --quiet, --collect, --on-active=2s, systemctl, poweroff, --no-block]
+          register: k3s_poweroff_schedule
+          ignore_unreachable: true
           changed_when: true
+
+        - name: Require confirmed poweroff scheduling
+          ansible.builtin.assert:
+            that:
+              - not (k3s_poweroff_schedule.unreachable | default(false) | bool)
+              - k3s_poweroff_schedule.rc | default(-1) == 0
+            fail_msg: Poweroff scheduling was not confirmed; stop before the next host.
+          delegate_to: localhost
+          become: false
 
         - name: Wait locally until SSH stops responding
           ansible.builtin.wait_for:
@@ -243,10 +254,21 @@
   tasks:
     - name: Request master poweroff and require SSH closure
       block:
-        - name: Request nonblocking system poweroff
+        - name: Schedule delayed system poweroff
           ansible.builtin.command:
-            argv: [systemctl, poweroff, --no-block]
+            argv: [systemd-run, --quiet, --collect, --on-active=2s, systemctl, poweroff, --no-block]
+          register: k3s_poweroff_schedule
+          ignore_unreachable: true
           changed_when: true
+
+        - name: Require confirmed poweroff scheduling
+          ansible.builtin.assert:
+            that:
+              - not (k3s_poweroff_schedule.unreachable | default(false) | bool)
+              - k3s_poweroff_schedule.rc | default(-1) == 0
+            fail_msg: Poweroff scheduling was not confirmed; stop before the next host.
+          delegate_to: localhost
+          become: false
 
         - name: Wait locally until SSH stops responding
           ansible.builtin.wait_for:
