@@ -90,6 +90,26 @@ class PowerOnTests(PlaybookTests):
             "Require exact Node membership", "Require every Node to be Ready",
         ))
 
+    def test_every_api_server_checks_every_kubelet_after_readiness(self) -> None:
+        play = next(p for p in self.plays if p["name"] == "Verify every recovered K3s server")
+        self.assertEqual("k3s_cluster", play["hosts"])
+        names = [task["name"] for task in play["tasks"]]
+        task = play["tasks"][names.index("Wait for local API and etcd readiness") + 1]
+        self.assertEqual([
+            "{{ k3s_binary_path }}", "kubectl", "--request-timeout=5s", "get",
+            "--raw=/api/v1/nodes/{{ item }}/proxy/healthz",
+        ], task["ansible.builtin.command"]["argv"])
+        for key, value in {
+            "become": True, "register": "k3s_kubelet_proxy", "changed_when": False,
+            "retries": 30, "delay": 2, "loop": "{{ groups.k3s_cluster }}",
+            "until": ["k3s_kubelet_proxy.rc == 0", 'k3s_kubelet_proxy.stdout | trim == "ok"'],
+            "loop_control": {"label": "{{ inventory_hostname }} API -> {{ item }} kubelet"},
+        }.items():
+            with self.subTest(key=key):
+                self.assertEqual(value, task[key])
+        for forbidden in ("delegate_to", "run_once", "ignore_errors", "ignore_unreachable", "failed_when"):
+            self.assertNotIn(forbidden, task)
+
     def test_power_on_observes_without_service_repair_or_fixed_sleep(self) -> None:
         for play in self.plays[1:]:
             self.assertTrue(play["any_errors_fatal"])

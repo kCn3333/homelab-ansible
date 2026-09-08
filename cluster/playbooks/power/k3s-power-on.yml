@@ -218,6 +218,26 @@
       retries: "{{ k3s_recovery_retries }}"
       delay: "{{ k3s_recovery_delay }}"
 
+    - name: Verify the local API server can proxy to every kubelet
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - --request-timeout=5s
+          - get
+          - "--raw=/api/v1/nodes/{{ item }}/proxy/healthz"
+      become: true
+      register: k3s_kubelet_proxy
+      changed_when: false
+      until:
+        - k3s_kubelet_proxy.rc == 0
+        - k3s_kubelet_proxy.stdout | trim == "ok"
+      retries: 30
+      delay: 2
+      loop: "{{ groups.k3s_cluster }}"
+      loop_control:
+        label: "{{ inventory_hostname }} API -> {{ item }} kubelet"
+
 - name: Verify the exact Kubernetes Node set from the master
   hosts: masters
   gather_facts: false
