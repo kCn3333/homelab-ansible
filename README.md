@@ -19,7 +19,7 @@ private Semaphore inventory and Key Store.
   serially. Automatic maintenance does not reboot.
 - Reboot requires one host from `reboot_approved`, a matching target variable,
   a reboot marker and no failed systemd units.
-- K3s power and UFW playbooks require the complete cluster without `--limit`.
+- K3s power playbooks require the complete cluster without `--limit`.
 - K3s shutdown requires two confirmations and checks Node and Longhorn state.
 - UFW rules use private inventory values and preserve unrelated rules and
   default policies.
