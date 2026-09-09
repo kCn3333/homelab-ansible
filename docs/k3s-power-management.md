@@ -53,7 +53,11 @@ cluster, or inspect workloads and platform integrations.
 Power On ends with an English summary table of SSH, Ansible, sudo, K3s,
 local API/etcd, and Node readiness checks, followed by the complete API-server
 to kubelet matrix and exact Node membership status. It uses registered results
-without additional cluster queries. `OK`, `FAILED`, and `NOT CHECKED` distinguish
+without additional cluster queries. The WOL section reports activation, global
+IPv4 readiness, packet sending per node, and deactivation. After `networkctl down`,
+a bounded read-only link check confirms that the interface no longer has the
+administrative `UP` flag before SSH recovery begins. Interface names, addresses,
+and raw command output are excluded from the summary. `OK`, `FAILED`, and `NOT CHECKED` distinguish
 successful, failed, and missing/skipped checks. Handled failures print a partial
 summary and then fail the playbook; WOL cleanup still runs before reporting.
 Unreachable Ansible hosts and interrupted executions can bypass rescue and

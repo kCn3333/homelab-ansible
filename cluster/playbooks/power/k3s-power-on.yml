@@ -90,6 +90,7 @@
         - name: Use the existing WOL network profile temporarily
           block:
             - name: Activate the WOL network profile
+              register: k3s_wol_activation
               ansible.builtin.command:
                 argv: [networkctl, up, "{{ k3s_wol_interface }}"]
               become: true
@@ -122,6 +123,7 @@
               no_log: true
 
             - name: Send Wake-on-LAN to every host before probing SSH
+              register: k3s_wol_send
               ansible.builtin.script:
                 cmd: >-
                   {{ (playbook_dir ~ '/../../scripts/send-wol.py') | quote }}
@@ -138,10 +140,24 @@
               no_log: true
           always:
             - name: Deactivate the WOL network profile
+              register: k3s_wol_deactivation
               ansible.builtin.command:
                 argv: [networkctl, down, "{{ k3s_wol_interface }}"]
               become: true
               changed_when: true
+              no_log: true
+
+            - name: Verify the WOL interface is administratively down
+              ansible.builtin.command:
+                argv: [ip, -json, link, show, dev, "{{ k3s_wol_interface }}"]
+              register: k3s_wol_down
+              changed_when: false
+              until: >-
+                k3s_wol_down.rc == 0
+                and k3s_wol_down.stdout | from_json | length == 1
+                and 'UP' not in (k3s_wol_down.stdout | from_json)[0].flags
+              retries: 10
+              delay: 1
               no_log: true
       rescue:
         - name: Show partial Power On summary

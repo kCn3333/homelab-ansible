@@ -84,6 +84,13 @@ class PowerOnTests(PlaybookTests):
             cleanup["ansible.builtin.command"]["argv"],
         )
         self.assertNotIn("failed_when", cleanup)
+        self.assertEqual("k3s_wol_deactivation", cleanup["register"])
+        down = lifecycle["always"][1]
+        self.assertEqual(["ip", "-json", "link", "show", "dev", "{{ k3s_wol_interface }}"],
+                         down["ansible.builtin.command"]["argv"])
+        self.assertIn("'UP' not in", down["until"])
+        self.assertTrue(down["no_log"])
+        self.assertNotIn("failed_when", down)
         self.assertEqual("localhost", self.plays[2]["hosts"])
         self.assertIn("after WOL cleanup", self.plays[2]["name"])
 
@@ -165,12 +172,22 @@ class PowerOnSummaryTests(unittest.TestCase):
             {"item": n, "state": "started"} for n in nodes]}}
         hosts["master"].update(k3s_membership={"changed": False},
                                  k3s_node_ready={"results": [dict(ok, item=n) for n in nodes]})
+        hosts["gateway"] = {key: ok for key in (
+            "k3s_wol_activation", "k3s_wol_active_address", "k3s_wol_deactivation", "k3s_wol_down")}
+        hosts["gateway"]["k3s_wol_send"] = {"results": [dict(ok, item=n) for n in nodes]}
         template = Environment(undefined=StrictUndefined, trim_blocks=True).from_string(
             (ROOT / "cluster/templates/k3s-power-on-summary.j2").read_text())
         def render():
-            return template.render(groups={"masters": nodes[:1], "workers": nodes[1:]},
+            return template.render(groups={"masters": nodes[:1], "workers": nodes[1:], "k3s_wol_gateway": ["gateway"]},
                                    hostvars=hosts, k3s_power_on_complete=True)
         self.assertIn("All required checks passed.", render())
+        for result, expected in (({"rc": 1}, "FAILED"), ({}, "NOT CHECKED"),
+                                 ({"rc": 0, "failed": True}, "FAILED")):
+            hosts["gateway"]["k3s_wol_down"] = result
+            output = render()
+            self.assertIn(expected, next(line for line in output.splitlines() if line.startswith("Administratively DOWN")))
+            self.assertIn("INCOMPLETE", output)
+        hosts["gateway"]["k3s_wol_down"] = ok
         hosts["worker1"]["k3s_kubelet_proxy"]["results"][2] = {
             "item": "worker2", "rc": 0, "failed": True, "stdout": "private details"}
         output = render()

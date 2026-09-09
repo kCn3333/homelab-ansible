@@ -54,6 +54,31 @@ API SERVER -> KUBELET
 {{ row(source, cells.values) }}
 {% endfor %}
 
+
+WOL INTERFACE LIFECYCLE
+{% for gateway in groups.k3s_wol_gateway | default([]) %}
+{% set data = hostvars[gateway] %}
+Gateway: {{ gateway }}
+{% for label, variable in [
+    ('Activation command', 'k3s_wol_activation'),
+    ('Active with global IPv4', 'k3s_wol_active_address'),
+    ('Deactivation command', 'k3s_wol_deactivation'),
+    ('Administratively DOWN', 'k3s_wol_down')] %}
+{% set value = status(data.get(variable, {}), 'rc', 0) %}
+{{ row(label, [value]) }}
+{% set report.all_ok = report.all_ok and value == 'OK' %}
+{% endfor %}
+{% for node in nodes %}
+{% set result = data.get('k3s_wol_send', {}).get('results', []) | selectattr('item', 'equalto', node) | first | default({}) %}
+{% set value = status(result, 'rc', 0) %}
+{{ row('WOL sent to ' ~ node, [value]) }}
+{% set report.all_ok = report.all_ok and value == 'OK' %}
+{% endfor %}
+{% else %}
+WOL interface: NOT CHECKED (gateway unavailable)
+{% set report.all_ok = false %}
+{% endfor %}
+
 Exact Node membership: {{ status(master.k3s_membership | default({}), 'changed', false) }}
 Result: {{ 'All required checks passed.' if k3s_power_on_complete | default(false) and report.all_ok and nodes and status(master.k3s_membership | default({}), 'changed', false) == 'OK' else 'INCOMPLETE - Power On has not passed all required checks.' }}
 OK = check passed; FAILED = check failed; NOT CHECKED = no result or skipped.
