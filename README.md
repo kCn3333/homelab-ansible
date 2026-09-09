@@ -1,99 +1,40 @@
-# Homelab Ansible playbooks
+# Homelab Ansible
 
-This public repository contains reusable Ansible playbooks and documentation.
-It deliberately contains no real inventory, host addresses, account names,
-credentials, topology, or environment-specific access policy.
+Public Ansible playbooks for K3s lifecycle and Debian host maintenance. Real
+inventory, addresses, credentials and environment-specific policy stay in
+private Semaphore inventory and Key Store.
 
-Automation is separated into two scopes:
+## Layout
 
-- [`cluster/`](cluster/README.md) for K3s server audits;
-- [`homelab/`](homelab/README.md) for general system audits outside the cluster.
+- [`cluster/`](cluster/README.md): K3s health, UFW, Wake-on-LAN and shutdown;
+- [`homelab/`](homelab/README.md): host audits, APT updates and approved reboot;
+- [`scripts/`](scripts/): host onboarding and public-tree validation;
+- [`docs/`](docs/): operational requirements.
 
-## Inventory model
+## Safety rules
 
-Real inventory is maintained as `static-yaml` in Semaphore and is never stored
-in this repository. Every command or task template must select the appropriate
-Semaphore inventory explicitly because [`ansible.cfg`](ansible.cfg) defines no
-default inventory.
+- `ansible.cfg` has no default inventory; select the private inventory explicitly.
+- SSH host-key checking is enabled.
+- APT playbooks target only `update_standard` or `update_automatic` and run
+  serially. Automatic maintenance does not reboot.
+- Reboot requires one host from `reboot_approved`, a matching target variable,
+  a reboot marker and no failed systemd units.
+- K3s power and UFW playbooks require the complete cluster without `--limit`.
+- K3s shutdown requires two confirmations and checks Node and Longhorn state.
+- UFW rules use private inventory values and preserve unrelated rules and
+  default policies.
 
-The playbooks expect abstract groups documented in the component READMEs. Group
-membership, connection variables, privilege escalation, and host-specific
-settings belong to the private Semaphore inventory. Secrets belong exclusively
-in Semaphore Key Store or in a separately designed Ansible Vault workflow.
+## Validation
 
-## Included playbooks
+```sh
+ansible-galaxy collection install -r collections/requirements.yml
+bash -n scripts/*.sh tests/*.sh
+python3 tests/test-cluster-scripts.py
+python3 tests/test-k3s-lifecycle.py
+python3 tests/test-k3s-ufw.py
+scripts/scan-public-tree.py scripts tests cluster docs .github README.md homelab/README.md
+git diff --check
+```
 
-The repository provides non-mutating audits and explicitly gated APT
-maintenance:
-
-- cluster connectivity;
-- guarded K3s Wake-on-LAN, health reporting, and approved full-cluster shutdown;
-- homelab connectivity;
-- homelab system preflight information;
-- a read-only preview of safe APT updates;
-- serial installation of safe APT updates for hosts explicitly assigned to
-  `update_standard`;
-- serial automatic APT maintenance for hosts explicitly assigned to
-  `update_automatic`;
-- a separately approved reboot workflow for exactly one host explicitly
-  selected from `reboot_approved`;
-- a local test for maintenance notifications.
-
-Run the APT preview before the upgrade playbook. The `update_standard` group is
-an explicit safety gate: update playbooks never target `all` or the broader
-`homelab_managed` group. Updates run one host at a time. Automatic reboot and
-package autoremove are disabled, although package installation scripts may
-still restart the particular services managed by those packages.
-
-Automatic maintenance is a separate, explicit policy for the
-`update_automatic` group. It performs a distribution upgrade followed by
-autoremove with purge, autoclean, and clean, but never reboots a host
-automatically. Maintenance notifications use `MAINTENANCE_NTFY_URL` and
-`MAINTENANCE_NTFY_TOKEN`, supplied only as secret environment variables in
-Semaphore. The repository contains neither notification endpoints nor tokens.
-
-The reboot workflow is never scheduled automatically. It requires a one-host
-limit, a matching explicit target variable, a pending reboot marker, and a
-clean systemd state before restarting the selected host.
-
-No general shutdown, firewall, SSH configuration, cluster installation, or
-unrelated cleanup automation is included.
-
-K3s power operations are deliberately separate from general host maintenance.
-Power On validates the complete private inventory without a limit. It
-temporarily activates an existing manual Netplan VLAN profile on the single
-explicit `k3s_wol_gateway`, sends all Wake-on-LAN packets there, and deactivates
-it before waiting for cluster SSH. It then
-checks each local Kubernetes API, its etcd backend, and the exact Ready Node set
-without changing scheduling. The lifecycle playbook does not edit Netplan or
-create or remove the interface.
-Health Check is read-only and supports `report` and `strict` policies. Approved
-Shutdown requires the complete cluster plus two explicit confirmations,
-checks Ready Nodes and active Longhorn backup/restore safety without cordon or
-drain, then requests poweroff for the worker-order group before the master.
-Closed SSH ports are observations, not proof of physical power state. See
-[`docs/k3s-power-management.md`](docs/k3s-power-management.md).
-
-## Optional host onboarding tools
-
-The scripts in [`scripts/`](scripts/) provide optional, review-first host
-auditing, bootstrap, and known-hosts file maintenance. Onboarding remains a
-two-channel process: generic automation is public, while real inventory,
-connection details, and secrets stay outside this repository in Semaphore or
-on the administrator workstation. See
-[`docs/host-onboarding.md`](docs/host-onboarding.md) for the complete procedure.
-
-## Local development
-
-Syntax validation requires a temporary inventory containing fictional hosts and
-the documented groups. Do not add that inventory to Git. For example, reserve
-documentation addresses from RFC 5737 such as `192.0.2.0/24` if a local test
-needs an address.
-
-SSH host-key checking remains enabled. The playbooks do not configure remote
-users or privilege escalation.
-
-## License
-
-No license file is currently included. Confirm licensing terms before reuse or
-redistribution.
+Use a temporary inventory with fictional hosts for `ansible-playbook
+--syntax-check`. Do not commit inventory files.

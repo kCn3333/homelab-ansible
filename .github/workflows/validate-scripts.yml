@@ -47,8 +47,7 @@ jobs:
             77) echo "bootstrap-managed-host: SKIP" ;;
             *) echo "bootstrap-managed-host: FAIL" >&2; exit "$bootstrap_rc" ;;
           esac
-          python3 tests/test-send-wol.py
-          python3 tests/test-check-longhorn-restore.py
+          python3 tests/test-cluster-scripts.py
           python3 tests/test-k3s-lifecycle.py
           python3 tests/test-k3s-ufw.py
           ansible-playbook -i localhost, --connection=local tests/test-k3s-node-state-collection.yml
@@ -61,8 +60,7 @@ jobs:
           test -x cluster/scripts/send-wol.py
           test -x cluster/scripts/check-longhorn-restore.py
           test -x scripts/scan-public-tree.py
-          test -x tests/test-check-longhorn-restore.py
-          test -x tests/test-send-wol.py
+          test -x tests/test-cluster-scripts.py
           test -x tests/test-k3s-lifecycle.py
           test -z "$(find cluster/playbooks docs -type f -perm /111 -print -quit)"
           test ! -x .github/workflows/validate-scripts.yml

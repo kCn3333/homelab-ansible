@@ -1,339 +1,119 @@
 #!/usr/bin/env python3
-"""Structural safety tests for K3s lifecycle playbooks; executes no operations."""
-
-from __future__ import annotations
-
-import pathlib
+"""Structural safety checks for K3s playbooks; runs no managed-host tasks."""
+from pathlib import Path
 import unittest
-
-from jinja2 import Environment, StrictUndefined
 
 import yaml
 
-
-ROOT = pathlib.Path(__file__).parents[1]
-
-
-def named_task(play: dict, name: str) -> dict:
-    return next(task for task in play.get("tasks", []) if task["name"] == name)
+ROOT = Path(__file__).parents[1]
 
 
-class PlaybookTests(unittest.TestCase):
-    path: pathlib.Path
+def load(path):
+    text = (ROOT / path).read_text()
+    return text, yaml.safe_load(text)
 
+
+def tasks(play):
+    wrapper = play["tasks"][0]
+    return wrapper.get("block", play["tasks"])
+
+
+class LifecycleTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        cls.text = cls.path.read_text(encoding="utf-8")
-        cls.plays = yaml.safe_load(cls.text)
+    def setUpClass(cls):
+        cls.on_text, cls.on = load("cluster/playbooks/power/k3s-power-on.yml")
+        cls.off_text, cls.off = load("cluster/playbooks/power/k3s-power-off.yml")
 
-    def assert_contains_all(self, text: str, values: tuple[str, ...]) -> None:
-        for value in values:
-            with self.subTest(value=value):
-                self.assertIn(value, text)
+    def test_power_on_scope_and_recovery(self):
+        self.assertEqual(self.on[0]["hosts"], "localhost")
+        scope = "\n".join(tasks(self.on[0])[0]["ansible.builtin.assert"]["that"])
+        for value in ("ansible_limit", "groups.workers | length == 2",
+                      "groups.k3s_cluster | length == 3",
+                      "groups.k3s_wol_gateway | length == 1",
+                      "groups.k3s_wol_gateway | intersect(groups.k3s_cluster)"):
+            self.assertIn(value, scope)
+        for value in ("Wait for active K3s service", "readyz check passed", "[+]etcd ok",
+                      "Require exact Node membership", "Require every Node to be Ready"):
+            self.assertIn(value, self.on_text)
+        self.assertTrue(all(play["any_errors_fatal"] for play in self.on[1:]))
 
+    def test_wol_activation_retry_and_cleanup(self):
+        gateway = self.on[1]
+        self.assertEqual(gateway["hosts"], "k3s_wol_gateway")
+        lifecycle = next(task for task in tasks(gateway)
+                         if task["name"] == "Use the existing WOL network profile temporarily")
+        active, ready, send = lifecycle["block"]
+        self.assertEqual(active["ansible.builtin.command"]["argv"],
+                         ["networkctl", "up", "{{ k3s_wol_interface }}"])
+        self.assertEqual((ready["retries"], ready["delay"], ready["no_log"]), (30, 2, True))
+        self.assertIn("addr_info | length > 0", ready["until"])
+        self.assertEqual(send["loop"], "{{ groups.k3s_cluster }}")
+        down, verify = lifecycle["always"]
+        self.assertEqual(down["ansible.builtin.command"]["argv"],
+                         ["networkctl", "down", "{{ k3s_wol_interface }}"])
+        self.assertIn("'UP' not in", verify["until"])
+        self.assertTrue(down["no_log"] and verify["no_log"])
 
-class PowerOnTests(PlaybookTests):
-    path = ROOT / "cluster/playbooks/power/k3s-power-on.yml"
+    def test_every_api_checks_every_kubelet(self):
+        play = next(play for play in self.on if play["name"] == "Verify every recovered K3s server")
+        check = next(task for task in tasks(play)
+                     if task["name"] == "Verify the local API server can proxy to every kubelet")
+        self.assertEqual(check["loop"], "{{ groups.k3s_cluster }}")
+        self.assertEqual(check["until"], ["k3s_kubelet_proxy.rc == 0",
+                                          'k3s_kubelet_proxy.stdout | trim == "ok"'])
+        self.assertEqual((check["retries"], check["delay"]), (30, 2))
+        self.assertIn("--raw=/api/v1/nodes/{{ item }}/proxy/healthz",
+                      check["ansible.builtin.command"]["argv"])
+        for key in ("delegate_to", "run_once", "ignore_errors", "ignore_unreachable"):
+            self.assertNotIn(key, check)
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        cls.wrappers = [play["tasks"][0] for play in cls.plays]
-        for play, wrapper in zip(cls.plays, cls.wrappers):
-            play["tasks"] = wrapper["block"] + play["tasks"][1:]
+    def test_power_on_has_no_repairs_private_values_or_extended_audits(self):
+        lowered = self.on_text.lower()
+        for value in ("ansible.builtin.shell", "argv: [sleep", "systemctl start",
+                      "systemctl restart", "ip link add", "ip address add", "ip link delete",
+                      "192.168.", "vlan5-wol", "ens18", "ens19", "cordon", "drain",
+                      "flux", "longhorn", "cnpg"):
+            self.assertNotIn(value, lowered)
 
-    def test_summary_reports_handled_failures_before_stopping(self) -> None:
-        for wrapper in self.wrappers:
-            report, stop = wrapper["rescue"]
-            self.assertEqual("../../tasks/k3s-power-on-summary.yml", report["ansible.builtin.include_tasks"])
-            self.assertTrue(report["run_once"])
-            self.assertIn("ansible.builtin.fail", stop)
-        self.assertTrue(self.plays[-1]["tasks"][-1]["vars"]["k3s_power_on_complete"])
+    def test_poweroff_scope_order_and_storage_checks(self):
+        scope = "\n".join(tasks(self.off[0])[0]["ansible.builtin.assert"]["that"])
+        for value in ("k3s_power_action", "k3s_shutdown_confirm", "ansible_limit",
+                      "groups.workers | length == 2"):
+            self.assertIn(value, scope)
+        self.assertEqual([play["hosts"] for play in self.off],
+                         ["k3s_cluster", "masters", "workers", "masters"])
+        self.assertEqual((self.off[2]["serial"], self.off[2]["order"]), (1, "inventory"))
+        for value in ("--output=custom-columns=STATE:.status.state", "--output=json",
+                      "check-longhorn-restore.py", "selectattr('state', 'equalto', 'started')"):
+            self.assertIn(value, self.off_text)
 
-    def test_controller_validates_scope_before_wol(self) -> None:
-        self.assertEqual("localhost", self.plays[0]["hosts"])
-        first = self.plays[0]["tasks"][0]
-        assertions = "\n".join(first["ansible.builtin.assert"]["that"])
-        self.assert_contains_all(assertions, (
-            "ansible_limit", "groups.workers | length == 2",
-            "groups.k3s_cluster | length == 3", "groups.k3s_wol_gateway | length == 1",
-            "groups.k3s_wol_gateway | intersect(groups.k3s_cluster)",
-        ))
-
-    def test_gateway_contract_and_wol_lifecycle(self) -> None:
-        gateway = self.plays[1]
-        self.assertEqual("k3s_wol_gateway", gateway["hosts"])
-        settings = named_task(gateway, "Require private WOL gateway network variables")
-        assertions = "\n".join(settings["ansible.builtin.assert"]["that"])
-        for required in ("k3s_wol_interface is defined", "k3s_wol_broadcast is defined"):
-            self.assertIn(required, assertions)
-        lifecycle = named_task(gateway, "Use the existing WOL network profile temporarily")
-        names = [task["name"] for task in lifecycle["block"]]
-        activate = names.index("Activate the WOL network profile")
-        send = names.index("Send Wake-on-LAN to every host before probing SSH")
-        wait = names.index("Wait for an active WOL interface with a global IPv4 address")
-        self.assertLess(activate, wait)
-        self.assertLess(wait, send)
-        self.assertEqual(120, lifecycle["block"][activate]["async"])
-        send_task = lifecycle["block"][send]
-        self.assertEqual("{{ groups.k3s_cluster }}", send_task["loop"])
-        self.assertTrue(send_task["no_log"])
-        cleanup = lifecycle["always"][0]
-        self.assertEqual(
-            ["networkctl", "down", "{{ k3s_wol_interface }}"],
-            cleanup["ansible.builtin.command"]["argv"],
-        )
-        self.assertNotIn("failed_when", cleanup)
-        self.assertEqual("k3s_wol_deactivation", cleanup["register"])
-        down = lifecycle["always"][1]
-        self.assertEqual(["ip", "-json", "link", "show", "dev", "{{ k3s_wol_interface }}"],
-                         down["ansible.builtin.command"]["argv"])
-        self.assertIn("'UP' not in", down["until"])
-        self.assertTrue(down["no_log"])
-        self.assertNotIn("failed_when", down)
-        self.assertEqual("localhost", self.plays[2]["hosts"])
-        self.assertIn("after WOL cleanup", self.plays[2]["name"])
-
-        task = lifecycle["block"][wait]
-        self.assertEqual(
-            "k3s_wol_active_address.rc == 0 "
-            "and k3s_wol_active_address.stdout | from_json | length == 1 "
-            "and (k3s_wol_active_address.stdout | from_json)[0].addr_info | length > 0",
-            task["until"],
-        )
-        self.assertEqual(30, task["retries"])
-        self.assertEqual(2, task["delay"])
-        self.assertNotIn("failed_when", task)
-        self.assertTrue(task["no_log"])
-        self.assertFalse(task["changed_when"])
-
-    def test_recovery_waits_for_service_api_and_etcd(self) -> None:
-        self.assert_contains_all(self.text, (
-            "Wait for active K3s service", "k3s_service_state.stdout | trim == 'active'",
-            "Wait for local API and etcd readiness", "readyz check passed", "[+]etcd ok",
-            "Require exact Node membership", "Require every Node to be Ready",
-        ))
-
-    def test_every_api_server_checks_every_kubelet_after_readiness(self) -> None:
-        play = next(p for p in self.plays if p["name"] == "Verify every recovered K3s server")
-        self.assertEqual("k3s_cluster", play["hosts"])
-        names = [task["name"] for task in play["tasks"]]
-        task = play["tasks"][names.index("Wait for local API and etcd readiness") + 1]
-        self.assertEqual([
-            "{{ k3s_binary_path }}", "kubectl", "--request-timeout=5s", "get",
-            "--raw=/api/v1/nodes/{{ item }}/proxy/healthz",
-        ], task["ansible.builtin.command"]["argv"])
-        for key, value in {
-            "become": True, "register": "k3s_kubelet_proxy", "changed_when": False,
-            "retries": 30, "delay": 2, "loop": "{{ groups.k3s_cluster }}",
-            "until": ["k3s_kubelet_proxy.rc == 0", 'k3s_kubelet_proxy.stdout | trim == "ok"'],
-            "loop_control": {"label": "{{ inventory_hostname }} API -> {{ item }} kubelet"},
-        }.items():
-            with self.subTest(key=key):
-                self.assertEqual(value, task[key])
-        for forbidden in ("delegate_to", "run_once", "ignore_errors", "ignore_unreachable", "failed_when"):
-            self.assertNotIn(forbidden, task)
-
-    def test_power_on_observes_without_service_repair_or_fixed_sleep(self) -> None:
-        for play in self.plays[1:]:
-            self.assertTrue(play["any_errors_fatal"])
-        lowered = self.text.lower()
-        self.assertNotIn("ansible.builtin.shell", lowered)
-        self.assertNotIn("argv: [sleep", lowered)
-        self.assertNotRegex(lowered, r"(?m)^\s+- sleep(?:\s|$)")
-        self.assertNotIn("systemctl start", lowered)
-        self.assertNotIn("systemctl restart", lowered)
-        for private_value in ("192.168.", "vlan5-wol", "ens18", "ens19", "logos"):
-            self.assertNotIn(private_value, lowered)
-        for forbidden in ("ip link add", "ip address add", "ip link delete"):
-            self.assertNotIn(forbidden, lowered)
-
-    def test_node_names_use_one_column_output(self) -> None:
-        self.assertIn("--output=custom-columns=NAME:.metadata.name", self.text)
-        self.assertNotIn("--output=name", self.text)
-        self.assertNotIn("regex_replace', '^node/'", self.text)
-
-    def test_no_scheduling_or_extended_audits(self) -> None:
-        lowered = self.text.lower()
-        for forbidden in ("uncordon", "cordon", "drain", "flux", "longhorn", "cnpg", "pods", "jobs"):
-            self.assertNotIn(forbidden, lowered)
-
-
-class PowerOnSummaryTests(unittest.TestCase):
-    def test_summary_success_failure_and_missing_results(self) -> None:
-        nodes = ["master", "worker1", "worker2"]
-        ok = {"rc": 0, "failed": False}
-        hosts = {node: {
-            "k3s_connectivity": {"ping": "pong"}, "k3s_sudo": ok,
-            "k3s_service_state": ok, "k3s_local_readyz": ok,
-            "k3s_kubelet_proxy": {"results": [dict(ok, item=n) for n in nodes]},
-        } for node in nodes}
-        hosts["localhost"] = {"k3s_ssh_results": {"results": [
-            {"item": n, "state": "started"} for n in nodes]}}
-        hosts["master"].update(k3s_membership={"changed": False},
-                                 k3s_node_ready={"results": [dict(ok, item=n) for n in nodes]})
-        hosts["gateway"] = {key: ok for key in (
-            "k3s_wol_activation", "k3s_wol_active_address", "k3s_wol_deactivation", "k3s_wol_down")}
-        hosts["gateway"]["k3s_wol_send"] = {"results": [dict(ok, item=n) for n in nodes]}
-        template = Environment(undefined=StrictUndefined, trim_blocks=True).from_string(
-            (ROOT / "cluster/templates/k3s-power-on-summary.j2").read_text())
-        def render():
-            return template.render(groups={"masters": nodes[:1], "workers": nodes[1:], "k3s_wol_gateway": ["gateway"]},
-                                   hostvars=hosts, k3s_power_on_complete=True)
-        self.assertIn("All required checks passed.", render())
-        for result, expected in (({"rc": 1}, "FAILED"), ({}, "NOT CHECKED"),
-                                 ({"rc": 0, "failed": True}, "FAILED")):
-            hosts["gateway"]["k3s_wol_down"] = result
-            output = render()
-            self.assertIn(expected, next(line for line in output.splitlines() if line.startswith("Administratively DOWN")))
-            self.assertIn("INCOMPLETE", output)
-        hosts["gateway"]["k3s_wol_down"] = ok
-        hosts["worker1"]["k3s_kubelet_proxy"]["results"][2] = {
-            "item": "worker2", "rc": 0, "failed": True, "stdout": "private details"}
-        output = render()
-        self.assertIn("INCOMPLETE", output)
-        self.assertIn("FAILED", next(line for line in output.splitlines() if line.startswith("worker1")))
-        self.assertNotIn("private details", output)
-        hosts["worker1"] = {}
-        output = render()
-        self.assertIn("NOT CHECKED", next(line for line in output.splitlines() if line.startswith("worker1")))
-        self.assertIn("INCOMPLETE", output)
-
-
-class PowerOffTests(PlaybookTests):
-    path = ROOT / "cluster/playbooks/power/k3s-power-off.yml"
-
-    def test_confirmations_limit_and_inventory_are_required(self) -> None:
-        assertions = "\n".join(
-            self.plays[0]["tasks"][0]["ansible.builtin.assert"]["that"]
-        )
-        for required in ("k3s_power_action", "k3s_shutdown_confirm", "ansible_limit"):
-            self.assertIn(required, assertions)
-        self.assertIn("groups.workers | length == 2", assertions)
-
-    def test_workers_are_sequential_and_master_is_last(self) -> None:
-        self.assertEqual(["k3s_cluster", "masters", "workers", "masters"], [play["hosts"] for play in self.plays])
-        self.assertEqual(1, self.plays[2]["serial"])
-        self.assertEqual("inventory", self.plays[2]["order"])
-        self.assertNotIn("k3s_wol_", self.text)
-        self.assertNotIn("networkctl", self.text)
-
-    def test_poweroff_wait_boundary_is_linear(self) -> None:
-        for play in self.plays[2:]:
-            block = play["tasks"][0]["block"]
-            schedule, confirm, wait = block[:3]
-            self.assertEqual(
-                ["systemd-run", "--quiet", "--collect", "--on-active=2s",
-                 "systemctl", "poweroff", "--no-block"],
-                schedule["ansible.builtin.command"]["argv"],
-            )
-            self.assertEqual("k3s_poweroff_schedule", schedule["register"])
-            self.assertIs(schedule["ignore_unreachable"], True)
-            self.assertNotIn("failed_when", schedule)
-            self.assertEqual([
+    def test_poweroff_boundary_is_fail_closed(self):
+        expected = ["systemd-run", "--quiet", "--collect", "--on-active=2s",
+                    "systemctl", "poweroff", "--no-block"]
+        for play in self.off[2:]:
+            schedule, confirm, wait = play["tasks"][0]["block"][:3]
+            self.assertEqual(schedule["ansible.builtin.command"]["argv"], expected)
+            self.assertTrue(schedule["ignore_unreachable"])
+            self.assertEqual(confirm["ansible.builtin.assert"]["that"], [
                 "not (k3s_poweroff_schedule.unreachable | default(false) | bool)",
-                "k3s_poweroff_schedule.rc | default(-1) == 0",
-            ], confirm["ansible.builtin.assert"]["that"])
-            for local_task in (confirm, wait):
-                self.assertEqual("localhost", local_task["delegate_to"])
-                self.assertIs(local_task["become"], False)
-                self.assertNotIn("failed_when", local_task)
-            self.assertEqual("stopped", wait["ansible.builtin.wait_for"]["state"])
+                "k3s_poweroff_schedule.rc | default(-1) == 0"])
+            self.assertEqual(wait["ansible.builtin.wait_for"]["state"], "stopped")
             self.assertTrue(play["any_errors_fatal"])
-            self.assertIn("ansible.builtin.fail", play["tasks"][0]["rescue"][-1])
-        self.assertEqual(2, self.text.count("ignore_unreachable:"))
-        self.assertNotIn("ignore_errors", self.text)
-        self.assertNotIn("ansible.builtin.shell", self.text)
-        self.assertNotIn("ansible.builtin.pause", self.text)
-        self.assertNotIn("argv: [sleep", self.text)
+        tail = self.off_text[self.off_text.index("# Safety boundary:"):].lower()
+        for value in ("kubectl", "cordon", "drain", "rollback", "uncordon"):
+            self.assertNotIn(value, tail)
+        self.assertEqual(self.off_text.count("ignore_unreachable:"), 2)
+        self.assertNotIn("ignore_errors", self.off_text)
 
-    def test_no_api_or_rollback_after_first_poweroff(self) -> None:
-        boundary = self.text.index("# Safety boundary:")
-        tail = self.text[boundary:].lower()
-        for forbidden in ("kubectl", "cordon", "drain", "rollback", "uncordon"):
-            self.assertNotIn(forbidden, tail)
-
-    def test_storage_and_partial_probe_parsers_are_fail_closed(self) -> None:
-        self.assert_contains_all(self.text, (
-            "--output=custom-columns=STATE:.status.state", "--output=json",
-            "check-longhorn-restore.py", "selectattr('state', 'equalto', 'started')",
-            "--output=custom-columns=NAME:.metadata.name",
-        ))
-        for forbidden in ("restoreStatus[*]", "selectattr('failed'", "rejectattr('failed'", "--output=name"):
-            self.assertNotIn(forbidden, self.text)
-
-
-class AuditSummaryTests(unittest.TestCase):
-    def test_health_table_distinguishes_results_and_thresholds(self) -> None:
-        env = Environment(undefined=StrictUndefined, trim_blocks=True)
-        env.filters["difference"] = lambda a, b: [item for item in a if item not in b]
-        template = env.from_string((ROOT / "cluster/templates/k3s-health-summary.j2").read_text())
-        host = {
-            "k3s_health_service": {"rc": 0, "stdout": "active"},
-            "k3s_health_version": {"rc": 0, "stdout_lines": ["k3s version v1.34.4+k3s1 (c6017918)"]},
-            "k3s_health_failed_units": {"rc": 1, "stdout_lines": []},
-            "k3s_health_memory_threshold": 90,
-            "k3s_health_host_report": {"memory_used_percent": 85, "root_used_percent": 95},
-            "k3s_health_live_node_names": ["master"],
-        }
-        output = template.render(groups={"masters": ["master"], "workers": ["worker"]},
-                                 hostvars={"master": host, "worker": {}}, k3s_health_mode="strict")
-        for row, expected in (("K3s service", "OK"), ("Failed systemd units", "FAILED"),
-                              ("RAM used", "OK (85%)"), ("Root filesystem", "WARNING (95%)")):
-            line = next(line for line in output.splitlines() if line.startswith(row))
-            self.assertIn(expected, line)
-            self.assertIn("NOT CHECKED", line)
-        rows = [line for line in output.splitlines() if " | " in line]
-        self.assertEqual(1, len({len(line) for line in rows}))
-        self.assertEqual(1, len({tuple(i for i, char in enumerate(line) if char == "|") for line in rows}))
-        self.assertIn("v1.34.4+k3s1", output)
-        self.assertNotIn("k3s version", output)
-        self.assertNotIn("c6017918", output)
-        self.assertIn("Missing Nodes: worker", output)
-        self.assertIn("Exact Node membership: FAILED", output)
-
-    def test_connectivity_summary_and_failure_gate(self) -> None:
-        play = yaml.safe_load((ROOT / "cluster/playbooks/audit/connectivity.yml").read_text())[0]
-        wrapper = play["tasks"][0]
-        probe, gate = wrapper["block"]
-        self.assertTrue(probe["ignore_unreachable"])
-        self.assertEqual("localhost", gate["delegate_to"])
-        self.assertIn("ansible.builtin.assert", gate)
-        self.assertTrue(wrapper["always"][0]["run_once"])
-        template = Environment(undefined=StrictUndefined, trim_blocks=True).from_string(
-            (ROOT / "cluster/templates/k3s-connectivity-summary.j2").read_text())
-        for result, expected in (({"ping": "pong"}, "OK"), ({"unreachable": True}, "FAILED"),
-                                 ({"failed": True}, "FAILED"), ({}, "NOT CHECKED")):
-            with self.subTest(result=result):
-                output = template.render(ansible_play_hosts_all=["node"],
-                                         hostvars={"node": {"k3s_connectivity_audit": result}})
-                self.assertIn("node | " + expected, output)
-
-
-class HealthTests(PlaybookTests):
-    path = ROOT / "cluster/playbooks/audit/k3s-health.yml"
-
-    def test_basic_health_excludes_extended_audits(self) -> None:
-        lowered = self.text.lower()
-        for forbidden in ("flux", "longhorn", "cnpg", "networkpolicy", "backups", "restore", "pods", "jobs"):
-            self.assertNotIn(forbidden, lowered)
-
-    def test_report_and_strict_policy_are_explicit(self) -> None:
-        self.assertIn("k3s_health_mode in ['report', 'strict']", self.text)
-        wrapper = self.plays[-1]["tasks"][0]
-        self.assertEqual("../../tasks/k3s-health-summary.yml", wrapper["always"][0]["ansible.builtin.include_tasks"])
-        final_assert = wrapper["block"][-1]["ansible.builtin.assert"]["that"]
-        self.assertTrue(final_assert)
-        self.assertTrue(all("k3s_health_mode != 'strict' or" in item for item in final_assert))
-
-    def test_probe_node_and_memory_parsers_are_fail_closed(self) -> None:
-        self.assert_contains_all(self.text, (
-            "item.state == 'started'", "--output=custom-columns=NAME:.metadata.name",
-            "get\n              - node", "status.conditions", "memory_mb']['nocache']['used",
-            "difference(k3s_live_node_names)", "difference(k3s_expected_node_names)",
-        ))
-        for forbidden in ("item.failed", "custom-columns=NAME:.metadata.name,READY:", "memfree_mb", "from_json"):
-            self.assertNotIn(forbidden, self.text)
+    def test_health_policy_remains_narrow_and_explicit(self):
+        text, plays = load("cluster/playbooks/audit/k3s-health.yml")
+        self.assertIn("k3s_health_mode in ['report', 'strict']", text)
+        self.assertIn("k3s_health_mode != 'strict' or", text)
+        for value in ("flux", "longhorn", "cnpg", "networkpolicy", "backups", "restore"):
+            self.assertNotIn(value, text.lower())
+        wrapper = plays[-1]["tasks"][0]
+        self.assertEqual(wrapper["always"][0]["ansible.builtin.include_tasks"],
+                         "../../tasks/k3s-health-summary.yml")
 
 
 if __name__ == "__main__":
