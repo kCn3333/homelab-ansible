@@ -20,6 +20,9 @@ jobs:
 
       - name: Install validation tools
         run: |
+          # Chrome is not used by this job; its preinstalled repository can be
+          # updated out of sync with its Release metadata on hosted runners.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y ripgrep shellcheck
           python3 -m pip install --disable-pip-version-check 'ansible-core==2.20.7'
