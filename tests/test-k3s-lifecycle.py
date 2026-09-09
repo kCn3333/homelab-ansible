@@ -270,6 +270,7 @@ class AuditSummaryTests(unittest.TestCase):
         template = env.from_string((ROOT / "cluster/templates/k3s-health-summary.j2").read_text())
         host = {
             "k3s_health_service": {"rc": 0, "stdout": "active"},
+            "k3s_health_version": {"rc": 0, "stdout_lines": ["k3s version v1.34.4+k3s1 (c6017918)"]},
             "k3s_health_failed_units": {"rc": 1, "stdout_lines": []},
             "k3s_health_memory_threshold": 90,
             "k3s_health_host_report": {"memory_used_percent": 85, "root_used_percent": 95},
@@ -282,6 +283,12 @@ class AuditSummaryTests(unittest.TestCase):
             line = next(line for line in output.splitlines() if line.startswith(row))
             self.assertIn(expected, line)
             self.assertIn("NOT CHECKED", line)
+        rows = [line for line in output.splitlines() if " | " in line]
+        self.assertEqual(1, len({len(line) for line in rows}))
+        self.assertEqual(1, len({tuple(i for i, char in enumerate(line) if char == "|") for line in rows}))
+        self.assertIn("v1.34.4+k3s1", output)
+        self.assertNotIn("k3s version", output)
+        self.assertNotIn("c6017918", output)
         self.assertIn("Missing Nodes: worker", output)
         self.assertIn("Exact Node membership: FAILED", output)
 

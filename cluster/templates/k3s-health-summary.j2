@@ -2,7 +2,7 @@
 {% set master = hostvars[(groups.masters | default([]) | first)] if groups.masters | default([]) else {} %}
 {% set probes = hostvars.get('localhost', {}).get('k3s_health_ssh_probes', {}).get('results', []) %}
 {% set ready = master.get('k3s_health_node_ready_results', {}).get('results', []) %}
-{% set report = namespace(rows=[], width=16) %}
+{% set report = namespace(rows=[], width=14) %}
 {% for label, key in [('SSH port', 'ssh'), ('K3s service', 'k3s'), ('K3s version', 'version'),
     ('Local API and etcd', 'api_etcd'), ('Failed systemd units', 'failed_units'),
     ('Reboot required', 'reboot_required'), ('RAM used (no cache)', 'memory_used_percent'),
@@ -35,6 +35,10 @@
 {% set value.text = 'OK' if result.get('rc') == 0 and 'readyz check passed' in result.get('stdout', '') and '[+]etcd ok' in result.get('stdout', '') else 'FAILED' %}
 {% elif key == 'version' and result %}
 {% set value.text = result.get('stdout_lines', ['NOT CHECKED']) | first | default('NOT CHECKED') if result.get('rc') == 0 else 'FAILED' %}
+{% set parts = value.text.split() %}
+{% if parts | length >= 3 and parts[:2] == ['k3s', 'version'] %}
+{% set value.text = parts[2] %}
+{% endif %}
 {% elif key == 'failed_units' and result %}
 {% set count = result.get('stdout_lines', []) | length %}
 {% set value.text = ('WARNING' if count > 0 else 'OK') ~ ' (' ~ count ~ ')' if result.get('rc') == 0 and 'stdout_lines' in result else 'FAILED' %}
@@ -52,9 +56,13 @@
 {% endfor %}
 K3S HEALTH SUMMARY
 Mode: {{ k3s_health_mode | default('report') }}
+{% set separator = '-' * 24 ~ ('+' ~ '-' * (report.width + 2)) * (nodes | length) ~ '+' %}
+{{ separator }}
 {% for label, cells in [('Check', nodes)] + report.rows %}
-{{ '%-25s' | format(label) }}{% for cell in cells %} | {{ ('%-' ~ report.width ~ 's') | format(cell) }}{% endfor %}
-
+{{ '%-23s' | format(label) }}{% for cell in cells %} | {{ ('%-' ~ report.width ~ 's') | format(cell) }}{% endfor %} |
+{% if loop.first or loop.last %}
+{{ separator }}
+{% endif %}
 {% endfor %}
 {% if master.k3s_health_live_node_names is defined %}
 Exact Node membership: {{ 'OK' if nodes | sort == master.k3s_health_live_node_names | sort else 'FAILED' }}
