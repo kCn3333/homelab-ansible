@@ -50,6 +50,15 @@ met. The master then confirms the exact Node set and that every Node is Ready.
 Power On does not start or restart services, cordon, uncordon, drain, repair the
 cluster, or inspect workloads and platform integrations.
 
+Power On ends with an English summary table of SSH, Ansible, sudo, K3s,
+local API/etcd, and Node readiness checks, followed by the complete API-server
+to kubelet matrix and exact Node membership status. It uses registered results
+without additional cluster queries. `OK`, `FAILED`, and `NOT CHECKED` distinguish
+successful, failed, and missing/skipped checks. Handled failures print a partial
+summary and then fail the playbook; WOL cleanup still runs before reporting.
+Unreachable Ansible hosts and interrupted executions can bypass rescue and
+prevent the summary from appearing. The normal Ansible error remains authoritative.
+
 Required private gateway inputs are `k3s_wol_interface` and
 `k3s_wol_broadcast`. Power On uses fixed public safety values: a 120-second
 activation timeout, WOL port 9, three packets, and a 0.2-second interval.

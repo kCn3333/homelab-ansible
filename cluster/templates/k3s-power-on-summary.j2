@@ -1,0 +1,59 @@
+{% set nodes = (groups.masters | default([])) + (groups.workers | default([])) %}
+{% set master = hostvars[(groups.masters | default([]) | first)] if groups.masters | default([]) else {} %}
+{% set ssh = hostvars.get('localhost', {}).get('k3s_ssh_results', {}).get('results', []) %}
+{% set ready = master.get('k3s_node_ready', {}).get('results', []) %}
+{% set width = ([11] + (nodes | map('length') | list)) | max %}
+{% macro status(result, field, expected) -%}
+{% if not result or result.skipped | default(false) %}NOT CHECKED{% elif result.failed | default(false) or result.unreachable | default(false) %}FAILED{% elif result.get(field) == expected %}OK{% else %}FAILED{% endif %}
+{%- endmacro %}
+{% macro row(label, cells) -%}
+{{ '%-27s' | format(label) }}{% for cell in cells %} | {{ ('%-' ~ width ~ 's') | format(cell) }}{% endfor %}
+{%- endmacro %}
+{% set report = namespace(lines=[], all_ok=true) %}
+{% for label, variable, field, expected in [
+    ('SSH port', '', 'state', 'started'),
+    ('Ansible connectivity', 'k3s_connectivity', 'ping', 'pong'),
+    ('Sudo privileges', 'k3s_sudo', 'rc', 0),
+    ('K3s service active', 'k3s_service_state', 'rc', 0),
+    ('Local API and etcd ready', 'k3s_local_readyz', 'rc', 0),
+    ('Kubernetes Node Ready', '', 'rc', 0)] %}
+{% set cells = namespace(values=[]) %}
+{% for node in nodes %}
+{% if label == 'SSH port' %}
+{% set result = ssh | selectattr('item', 'equalto', node) | first | default({}) %}
+{% elif label == 'Kubernetes Node Ready' %}
+{% set result = ready | selectattr('item', 'equalto', node) | first | default({}) %}
+{% else %}
+{% set result = hostvars[node].get(variable, {}) %}
+{% endif %}
+{% set value = status(result, field, expected) %}
+{% set cells.values = cells.values + [value] %}
+{% set report.all_ok = report.all_ok and value == 'OK' %}
+{% endfor %}
+{% set report.lines = report.lines + [row(label, cells.values)] %}
+{% endfor %}
+POWER ON SUMMARY
+{% if ansible_failed_task is defined %}
+Stopped at: {{ ansible_failed_task.name }}
+{% endif %}
+{{ row('Check', nodes) }}
+{{ '-' * (30 + (width + 3) * (nodes | length)) }}
+{{ report.lines | join('\n') }}
+
+API SERVER -> KUBELET
+{{ row('API server / kubelet', nodes) }}
+{{ '-' * (30 + (width + 3) * (nodes | length)) }}
+{% for source in nodes %}
+{% set cells = namespace(values=[]) %}
+{% for target in nodes %}
+{% set result = hostvars[source].get('k3s_kubelet_proxy', {}).get('results', []) | selectattr('item', 'equalto', target) | first | default({}) %}
+{% set value = status(result, 'rc', 0) %}
+{% set cells.values = cells.values + [value] %}
+{% set report.all_ok = report.all_ok and value == 'OK' %}
+{% endfor %}
+{{ row(source, cells.values) }}
+{% endfor %}
+
+Exact Node membership: {{ status(master.k3s_membership | default({}), 'changed', false) }}
+Result: {{ 'All required checks passed.' if k3s_power_on_complete | default(false) and report.all_ok and nodes and status(master.k3s_membership | default({}), 'changed', false) == 'OK' else 'INCOMPLETE - Power On has not passed all required checks.' }}
+OK = check passed; FAILED = check failed; NOT CHECKED = no result or skipped.

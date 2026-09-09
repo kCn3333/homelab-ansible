@@ -1,0 +1,6 @@
+---
+- name: Power On summary
+  ansible.builtin.debug:
+    msg: "{{ lookup('ansible.builtin.template', '../templates/k3s-power-on-summary.j2').splitlines() }}"
+  delegate_to: localhost
+  become: false

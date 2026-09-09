@@ -6,6 +6,8 @@ from __future__ import annotations
 import pathlib
 import unittest
 
+from jinja2 import Environment, StrictUndefined
+
 import yaml
 
 
@@ -32,6 +34,21 @@ class PlaybookTests(unittest.TestCase):
 
 class PowerOnTests(PlaybookTests):
     path = ROOT / "cluster/playbooks/power/k3s-power-on.yml"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.wrappers = [play["tasks"][0] for play in cls.plays]
+        for play, wrapper in zip(cls.plays, cls.wrappers):
+            play["tasks"] = wrapper["block"] + play["tasks"][1:]
+
+    def test_summary_reports_handled_failures_before_stopping(self) -> None:
+        for wrapper in self.wrappers:
+            report, stop = wrapper["rescue"]
+            self.assertEqual("../../tasks/k3s-power-on-summary.yml", report["ansible.builtin.include_tasks"])
+            self.assertTrue(report["run_once"])
+            self.assertIn("ansible.builtin.fail", stop)
+        self.assertTrue(self.plays[-1]["tasks"][-1]["vars"]["k3s_power_on_complete"])
 
     def test_controller_validates_scope_before_wol(self) -> None:
         self.assertEqual("localhost", self.plays[0]["hosts"])
@@ -133,6 +150,37 @@ class PowerOnTests(PlaybookTests):
         lowered = self.text.lower()
         for forbidden in ("uncordon", "cordon", "drain", "flux", "longhorn", "cnpg", "pods", "jobs"):
             self.assertNotIn(forbidden, lowered)
+
+
+class PowerOnSummaryTests(unittest.TestCase):
+    def test_summary_success_failure_and_missing_results(self) -> None:
+        nodes = ["master", "worker1", "worker2"]
+        ok = {"rc": 0, "failed": False}
+        hosts = {node: {
+            "k3s_connectivity": {"ping": "pong"}, "k3s_sudo": ok,
+            "k3s_service_state": ok, "k3s_local_readyz": ok,
+            "k3s_kubelet_proxy": {"results": [dict(ok, item=n) for n in nodes]},
+        } for node in nodes}
+        hosts["localhost"] = {"k3s_ssh_results": {"results": [
+            {"item": n, "state": "started"} for n in nodes]}}
+        hosts["master"].update(k3s_membership={"changed": False},
+                                 k3s_node_ready={"results": [dict(ok, item=n) for n in nodes]})
+        template = Environment(undefined=StrictUndefined, trim_blocks=True).from_string(
+            (ROOT / "cluster/templates/k3s-power-on-summary.j2").read_text())
+        def render():
+            return template.render(groups={"masters": nodes[:1], "workers": nodes[1:]},
+                                   hostvars=hosts, k3s_power_on_complete=True)
+        self.assertIn("All required checks passed.", render())
+        hosts["worker1"]["k3s_kubelet_proxy"]["results"][2] = {
+            "item": "worker2", "rc": 0, "failed": True, "stdout": "private details"}
+        output = render()
+        self.assertIn("INCOMPLETE", output)
+        self.assertIn("FAILED", next(line for line in output.splitlines() if line.startswith("worker1")))
+        self.assertNotIn("private details", output)
+        hosts["worker1"] = {}
+        output = render()
+        self.assertIn("NOT CHECKED", next(line for line in output.splitlines() if line.startswith("worker1")))
+        self.assertIn("INCOMPLETE", output)
 
 
 class PowerOffTests(PlaybookTests):
