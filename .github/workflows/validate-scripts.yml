@@ -18,13 +18,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install validation tools
+      - name: Install Ansible validation tools
         run: |
-          # Chrome is not used by this job; its preinstalled repository can be
-          # updated out of sync with its Release metadata on hosted runners.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y ripgrep shellcheck
           python3 -m pip install --disable-pip-version-check 'ansible-core==2.20.7'
           ansible-galaxy collection install -r collections/requirements.yml
 
