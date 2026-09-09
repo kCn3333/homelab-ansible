@@ -263,6 +263,46 @@ class PowerOffTests(PlaybookTests):
             self.assertNotIn(forbidden, self.text)
 
 
+class AuditSummaryTests(unittest.TestCase):
+    def test_health_table_distinguishes_results_and_thresholds(self) -> None:
+        env = Environment(undefined=StrictUndefined, trim_blocks=True)
+        env.filters["difference"] = lambda a, b: [item for item in a if item not in b]
+        template = env.from_string((ROOT / "cluster/templates/k3s-health-summary.j2").read_text())
+        host = {
+            "k3s_health_service": {"rc": 0, "stdout": "active"},
+            "k3s_health_failed_units": {"rc": 1, "stdout_lines": []},
+            "k3s_health_memory_threshold": 90,
+            "k3s_health_host_report": {"memory_used_percent": 85, "root_used_percent": 95},
+            "k3s_health_live_node_names": ["master"],
+        }
+        output = template.render(groups={"masters": ["master"], "workers": ["worker"]},
+                                 hostvars={"master": host, "worker": {}}, k3s_health_mode="strict")
+        for row, expected in (("K3s service", "OK"), ("Failed systemd units", "FAILED"),
+                              ("RAM used", "OK (85%)"), ("Root filesystem", "WARNING (95%)")):
+            line = next(line for line in output.splitlines() if line.startswith(row))
+            self.assertIn(expected, line)
+            self.assertIn("NOT CHECKED", line)
+        self.assertIn("Missing Nodes: worker", output)
+        self.assertIn("Exact Node membership: FAILED", output)
+
+    def test_connectivity_summary_and_failure_gate(self) -> None:
+        play = yaml.safe_load((ROOT / "cluster/playbooks/audit/connectivity.yml").read_text())[0]
+        wrapper = play["tasks"][0]
+        probe, gate = wrapper["block"]
+        self.assertTrue(probe["ignore_unreachable"])
+        self.assertEqual("localhost", gate["delegate_to"])
+        self.assertIn("ansible.builtin.assert", gate)
+        self.assertTrue(wrapper["always"][0]["run_once"])
+        template = Environment(undefined=StrictUndefined, trim_blocks=True).from_string(
+            (ROOT / "cluster/templates/k3s-connectivity-summary.j2").read_text())
+        for result, expected in (({"ping": "pong"}, "OK"), ({"unreachable": True}, "FAILED"),
+                                 ({"failed": True}, "FAILED"), ({}, "NOT CHECKED")):
+            with self.subTest(result=result):
+                output = template.render(ansible_play_hosts_all=["node"],
+                                         hostvars={"node": {"k3s_connectivity_audit": result}})
+                self.assertIn("node | " + expected, output)
+
+
 class HealthTests(PlaybookTests):
     path = ROOT / "cluster/playbooks/audit/k3s-health.yml"
 
@@ -273,14 +313,16 @@ class HealthTests(PlaybookTests):
 
     def test_report_and_strict_policy_are_explicit(self) -> None:
         self.assertIn("k3s_health_mode in ['report', 'strict']", self.text)
-        final_assert = self.plays[-1]["tasks"][-1]["ansible.builtin.assert"]["that"]
+        wrapper = self.plays[-1]["tasks"][0]
+        self.assertEqual("../../tasks/k3s-health-summary.yml", wrapper["always"][0]["ansible.builtin.include_tasks"])
+        final_assert = wrapper["block"][-1]["ansible.builtin.assert"]["that"]
         self.assertTrue(final_assert)
         self.assertTrue(all("k3s_health_mode != 'strict' or" in item for item in final_assert))
 
     def test_probe_node_and_memory_parsers_are_fail_closed(self) -> None:
         self.assert_contains_all(self.text, (
             "item.state == 'started'", "--output=custom-columns=NAME:.metadata.name",
-            "get\n          - node", "status.conditions", "memory_mb']['nocache']['used",
+            "get\n              - node", "status.conditions", "memory_mb']['nocache']['used",
             "difference(k3s_live_node_names)", "difference(k3s_expected_node_names)",
         ))
         for forbidden in ("item.failed", "custom-columns=NAME:.metadata.name,READY:", "memfree_mb", "from_json"):

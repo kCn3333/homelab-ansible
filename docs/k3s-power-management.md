@@ -136,6 +136,19 @@ failed units, a reboot marker, or resource-usage warnings.
 errors such as an incomplete inventory or inability to read and parse cluster
 state can fail either mode because a trustworthy report cannot be produced.
 
+Basic Health ends with an English table of the collected checks and measurements
+for each inventory node, plus missing/unexpected Node findings. `OK`, `WARNING`,
+`FAILED`, and `NOT CHECKED` distinguish observations from missing or skipped data.
+Resource warnings use the configured thresholds. The table is printed even when
+the final policy assertion fails; handled collection failures show partial results
+and remain failures. Interrupted runs or unreachable hosts may prevent reporting.
+The summary makes no additional host or Kubernetes API requests.
+
+`cluster/playbooks/audit/connectivity.yml` prints a separate English table of
+Ansible connectivity for the selected hosts. Unreachable results fail a local
+assertion after being recorded, so the table does not turn connection failures
+into successful audits. No service or cluster-health checks are implied.
+
 Flux, Longhorn, CNPG, Pods, and Jobs are outside Basic Health. Future dedicated
 audits are planned at these paths:
 

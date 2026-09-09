@@ -1,0 +1,69 @@
+{% set nodes = (groups.masters | default([])) + (groups.workers | default([])) %}
+{% set master = hostvars[(groups.masters | default([]) | first)] if groups.masters | default([]) else {} %}
+{% set probes = hostvars.get('localhost', {}).get('k3s_health_ssh_probes', {}).get('results', []) %}
+{% set ready = master.get('k3s_health_node_ready_results', {}).get('results', []) %}
+{% set report = namespace(rows=[], width=16) %}
+{% for label, key in [('SSH port', 'ssh'), ('K3s service', 'k3s'), ('K3s version', 'version'),
+    ('Local API and etcd', 'api_etcd'), ('Failed systemd units', 'failed_units'),
+    ('Reboot required', 'reboot_required'), ('RAM used (no cache)', 'memory_used_percent'),
+    ('Root filesystem used', 'root_used_percent'), ('Kubernetes Node Ready', 'node_ready')] %}
+{% set row = namespace(cells=[]) %}
+{% for node in nodes %}
+{% set data = hostvars[node] %}
+{% set health = data.get('k3s_health_host_report', {}) %}
+{% set value = namespace(text='NOT CHECKED') %}
+{% if key == 'ssh' %}
+{% set result = probes | selectattr('item', 'equalto', node) | first | default({}) %}
+{% if result and not result.skipped | default(false) %}
+{% set value.text = 'OK' if result.get('state') == 'started' else 'FAILED' %}
+{% endif %}
+{% elif key == 'node_ready' %}
+{% set result = ready | selectattr('item', 'equalto', node) | first | default({}) %}
+{% if result and not result.skipped | default(false) %}
+{% set value.text = 'OK' if result.get('rc') == 0 and result.get('stdout', '') | trim == 'True' else 'FAILED' %}
+{% endif %}
+{% else %}
+{% set variable = {'k3s': 'k3s_health_service', 'version': 'k3s_health_version', 'api_etcd': 'k3s_health_readyz', 'failed_units': 'k3s_health_failed_units', 'reboot_required': 'k3s_health_reboot_marker', 'root_used_percent': 'k3s_health_root_df'}.get(key, '') %}
+{% set result = data.get(variable, {}) %}
+{% if result.skipped | default(false) %}
+{% set value.text = 'NOT CHECKED' %}
+{% elif result.failed | default(false) or result.unreachable | default(false) or ('rc' in result and result.rc != 0) %}
+{% set value.text = 'FAILED' %}
+{% elif key == 'k3s' and result %}
+{% set value.text = 'OK' if result.get('rc') == 0 and result.get('stdout', '') | trim == 'active' else 'FAILED' %}
+{% elif key == 'api_etcd' and result %}
+{% set value.text = 'OK' if result.get('rc') == 0 and 'readyz check passed' in result.get('stdout', '') and '[+]etcd ok' in result.get('stdout', '') else 'FAILED' %}
+{% elif key == 'version' and result %}
+{% set value.text = result.get('stdout_lines', ['NOT CHECKED']) | first | default('NOT CHECKED') if result.get('rc') == 0 else 'FAILED' %}
+{% elif key == 'failed_units' and result %}
+{% set count = result.get('stdout_lines', []) | length %}
+{% set value.text = ('WARNING' if count > 0 else 'OK') ~ ' (' ~ count ~ ')' if result.get('rc') == 0 and 'stdout_lines' in result else 'FAILED' %}
+{% elif key == 'reboot_required' and result.get('stat', {}).get('exists') is not none %}
+{% set value.text = 'WARNING (YES)' if result.stat.exists else 'OK (NO)' %}
+{% elif key in ['memory_used_percent', 'root_used_percent'] and key in health %}
+{% set threshold = data.get('k3s_health_memory_threshold' if key == 'memory_used_percent' else 'k3s_health_root_threshold', 80) %}
+{% set value.text = ('WARNING' if health[key] | float >= threshold | float else 'OK') ~ ' (' ~ health[key] ~ '%)' %}
+{% endif %}
+{% endif %}
+{% set row.cells = row.cells + [value.text] %}
+{% set report.width = [report.width, value.text | length, node | length] | max %}
+{% endfor %}
+{% set report.rows = report.rows + [(label, row.cells)] %}
+{% endfor %}
+K3S HEALTH SUMMARY
+Mode: {{ k3s_health_mode | default('report') }}
+{% for label, cells in [('Check', nodes)] + report.rows %}
+{{ '%-25s' | format(label) }}{% for cell in cells %} | {{ ('%-' ~ report.width ~ 's') | format(cell) }}{% endfor %}
+
+{% endfor %}
+{% if master.k3s_health_live_node_names is defined %}
+Exact Node membership: {{ 'OK' if nodes | sort == master.k3s_health_live_node_names | sort else 'FAILED' }}
+Missing Nodes: {{ nodes | difference(master.k3s_health_live_node_names) | join(', ') or 'none' }}
+Unexpected Nodes: {{ master.k3s_health_live_node_names | difference(nodes) | join(', ') or 'none' }}
+{% else %}
+Exact Node membership: NOT CHECKED
+{% endif %}
+Non-ready Nodes: {{ master.k3s_health_not_ready_nodes | join(', ') or 'none' if master.k3s_health_not_ready_nodes is defined else 'NOT CHECKED' }}
+OK = passed; WARNING = finding or threshold reached; FAILED = check failed.
+NOT CHECKED = no completed result or skipped. Version cells show the collected version.
+The table reports observations; the playbook exit status enforces the selected policy.

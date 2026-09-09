@@ -8,56 +8,67 @@
     k3s_health_mode: report
     k3s_health_connect_timeout: 3
   tasks:
-    - name: Require a valid mode and complete three-node inventory
-      ansible.builtin.assert:
-        that:
-          - k3s_health_mode in ['report', 'strict']
-          - "'masters' in groups"
-          - "'workers' in groups"
-          - "'k3s_cluster' in groups"
-          - groups.masters | default([]) | length == 1
-          - groups.workers | default([]) | length == 2
-          - groups.k3s_cluster | default([]) | length == 3
-          - groups.masters | default([]) | intersect(groups.workers | default([])) | length == 0
-          - groups.k3s_cluster | default([]) | sort == (groups.masters | default([]) + groups.workers | default([])) | sort
-        fail_msg: Basic Health requires report or strict mode and the complete inventory.
+    - name: Run basic health audit
+      block:
+        - name: Require a valid mode and complete three-node inventory
+          ansible.builtin.assert:
+            that:
+              - k3s_health_mode in ['report', 'strict']
+              - "'masters' in groups"
+              - "'workers' in groups"
+              - "'k3s_cluster' in groups"
+              - groups.masters | default([]) | length == 1
+              - groups.workers | default([]) | length == 2
+              - groups.k3s_cluster | default([]) | length == 3
+              - groups.masters | default([]) | intersect(groups.workers | default([])) | length == 0
+              - groups.k3s_cluster | default([]) | sort == (groups.masters | default([]) + groups.workers | default([])) | sort
+            fail_msg: Basic Health requires report or strict mode and the complete inventory.
 
-    - name: Require every host address
-      ansible.builtin.assert:
-        that:
-          - hostvars[item].ansible_host is defined
-          - hostvars[item].ansible_host | string | trim | length > 0
-      loop: "{{ groups.k3s_cluster | default([]) }}"
-      loop_control:
-        label: "{{ item }}"
+        - name: Require every host address
+          ansible.builtin.assert:
+            that:
+              - hostvars[item].ansible_host is defined
+              - hostvars[item].ansible_host | string | trim | length > 0
+          loop: "{{ groups.k3s_cluster | default([]) }}"
+          loop_control:
+            label: "{{ item }}"
 
-    - name: Probe every SSH endpoint
-      ansible.builtin.wait_for:
-        host: "{{ hostvars[item].ansible_host }}"
-        port: "{{ hostvars[item].ansible_port | default(22) }}"
-        state: started
-        connect_timeout: "{{ k3s_health_connect_timeout }}"
-        timeout: "{{ k3s_health_connect_timeout }}"
-      loop: "{{ groups.k3s_cluster }}"
-      loop_control:
-        label: "{{ item }}"
-      register: k3s_health_ssh_probes
-      failed_when: false
+        - name: Probe every SSH endpoint
+          ansible.builtin.wait_for:
+            host: "{{ hostvars[item].ansible_host }}"
+            port: "{{ hostvars[item].ansible_port | default(22) }}"
+            state: started
+            connect_timeout: "{{ k3s_health_connect_timeout }}"
+            timeout: "{{ k3s_health_connect_timeout }}"
+          loop: "{{ groups.k3s_cluster }}"
+          loop_control:
+            label: "{{ item }}"
+          register: k3s_health_ssh_probes
+          failed_when: false
 
-    - name: Record reachable hosts for read-only collection
-      ansible.builtin.add_host:
-        name: "{{ item.item }}"
-        groups: >-
-          {{ ['k3s_health_reachable']
-             + (['k3s_health_master'] if item.item in groups.masters else []) }}
-        k3s_health_ssh_reachable: true
-      loop: "{{ k3s_health_ssh_probes.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      changed_when: false
-      when:
-        - item.state is defined
-        - item.state == 'started'
+        - name: Record reachable hosts for read-only collection
+          ansible.builtin.add_host:
+            name: "{{ item.item }}"
+            groups: >-
+              {{ ['k3s_health_reachable']
+                 + (['k3s_health_master'] if item.item in groups.masters else []) }}
+            k3s_health_ssh_reachable: true
+          loop: "{{ k3s_health_ssh_probes.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          changed_when: false
+          when:
+            - item.state is defined
+            - item.state == 'started'
+      rescue:
+        - name: Show partial health summary
+          ansible.builtin.include_tasks: ../../tasks/k3s-health-summary.yml
+          run_once: true
+
+        - name: Preserve the audit collection failure
+          ansible.builtin.fail:
+            msg: Health collection failed; review the failed task and partial summary.
+
 
 - name: Collect basic host health from reachable servers
   hosts: k3s_health_reachable
@@ -68,95 +79,108 @@
     k3s_health_memory_warning_percent: 80
     k3s_health_root_warning_percent: 80
   tasks:
-    - name: Gather facts needed for memory reporting
-      ansible.builtin.setup:
-        gather_subset: [min, hardware]
+    - name: Run basic health audit
+      block:
+        - name: Gather facts needed for memory reporting
+          ansible.builtin.setup:
+            gather_subset: [min, hardware]
 
-    - name: Read K3s service state
-      ansible.builtin.command:
-        argv: [systemctl, is-active, k3s]
-      register: k3s_health_service
-      changed_when: false
-      failed_when: false
+        - name: Read K3s service state
+          ansible.builtin.command:
+            argv: [systemctl, is-active, k3s]
+          register: k3s_health_service
+          changed_when: false
+          failed_when: false
 
-    - name: Read K3s version
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", --version]
-      register: k3s_health_version
-      changed_when: false
-      failed_when: false
+        - name: Read K3s version
+          ansible.builtin.command:
+            argv: ["{{ k3s_binary_path }}", --version]
+          register: k3s_health_version
+          changed_when: false
+          failed_when: false
 
-    - name: Read local API and etcd readiness
-      ansible.builtin.command:
-        argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
-      register: k3s_health_readyz
-      changed_when: false
-      failed_when: false
+        - name: Read local API and etcd readiness
+          ansible.builtin.command:
+            argv: ["{{ k3s_binary_path }}", kubectl, get, "--raw=/readyz?verbose"]
+          register: k3s_health_readyz
+          changed_when: false
+          failed_when: false
 
-    - name: Read failed systemd units
-      ansible.builtin.command:
-        argv: [systemctl, --failed, --no-legend, --plain, --no-pager]
-      register: k3s_health_failed_units
-      changed_when: false
-      failed_when: false
+        - name: Read failed systemd units
+          ansible.builtin.command:
+            argv: [systemctl, --failed, --no-legend, --plain, --no-pager]
+          register: k3s_health_failed_units
+          changed_when: false
+          failed_when: false
 
-    - name: Check reboot-required marker
-      ansible.builtin.stat:
-        path: /var/run/reboot-required
-      register: k3s_health_reboot_marker
+        - name: Check reboot-required marker
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: k3s_health_reboot_marker
 
-    - name: Read root filesystem usage
-      ansible.builtin.command:
-        argv: [df, --output=pcent, /]
-      register: k3s_health_root_df
-      changed_when: false
+        - name: Read root filesystem usage
+          ansible.builtin.command:
+            argv: [df, --output=pcent, /]
+          register: k3s_health_root_df
+          changed_when: false
 
-    - name: Validate memory facts
-      ansible.builtin.assert:
-        that:
-          - ansible_facts['memory_mb']['real']['total'] | int > 0
-          - ansible_facts['memory_mb']['nocache']['used'] | int >= 0
-          - >-
-            ansible_facts['memory_mb']['nocache']['used'] | int
-            <= ansible_facts['memory_mb']['real']['total'] | int
+        - name: Validate memory facts
+          ansible.builtin.assert:
+            that:
+              - ansible_facts['memory_mb']['real']['total'] | int > 0
+              - ansible_facts['memory_mb']['nocache']['used'] | int >= 0
+              - >-
+                ansible_facts['memory_mb']['nocache']['used'] | int
+                <= ansible_facts['memory_mb']['real']['total'] | int
 
-    - name: Calculate memory usage without filesystem cache
-      ansible.builtin.set_fact:
-        k3s_health_memory_used_percent: >-
-          {{ (((ansible_facts['memory_mb']['nocache']['used'] | int)
-               / (ansible_facts['memory_mb']['real']['total'] | int)) * 100) | round(1) }}
+        - name: Calculate memory usage without filesystem cache
+          ansible.builtin.set_fact:
+            k3s_health_memory_used_percent: >-
+              {{ (((ansible_facts['memory_mb']['nocache']['used'] | int)
+                   / (ansible_facts['memory_mb']['real']['total'] | int)) * 100) | round(1) }}
 
-    - name: Validate calculated memory percentage
-      ansible.builtin.assert:
-        that:
-          - k3s_health_memory_used_percent | float >= 0
-          - k3s_health_memory_used_percent | float <= 100
+        - name: Validate calculated memory percentage
+          ansible.builtin.assert:
+            that:
+              - k3s_health_memory_used_percent | float >= 0
+              - k3s_health_memory_used_percent | float <= 100
 
-    - name: Store concise host health facts
-      ansible.builtin.set_fact:
-        k3s_health_host_report:
-          ssh: REACHABLE
-          k3s: "{{ k3s_health_service.stdout | trim | default('unknown', true) }}"
-          version: "{{ k3s_health_version.stdout_lines | default(['unavailable']) | first }}"
-          api_etcd: >-
-            {{ 'READY' if k3s_health_readyz.rc == 0
-               and 'readyz check passed' in k3s_health_readyz.stdout
-               and '[+]etcd ok' in k3s_health_readyz.stdout else 'NOT_READY' }}
-          failed_units: "{{ k3s_health_failed_units.stdout_lines | length }}"
-          reboot_required: "{{ 'YES' if k3s_health_reboot_marker.stat.exists else 'NO' }}"
-          memory_used_percent: "{{ k3s_health_memory_used_percent }}"
-          root_used_percent: "{{ k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int }}"
-        k3s_health_host_critical: >-
-          {{ k3s_health_service.stdout | trim != 'active'
-             or k3s_health_readyz.rc != 0
-             or 'readyz check passed' not in k3s_health_readyz.stdout
-             or '[+]etcd ok' not in k3s_health_readyz.stdout }}
-        k3s_health_host_warning: >-
-          {{ k3s_health_failed_units.stdout_lines | length > 0
-             or k3s_health_reboot_marker.stat.exists
-             or k3s_health_memory_used_percent | float >= k3s_health_memory_warning_percent
-             or (k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int)
-                >= k3s_health_root_warning_percent }}
+        - name: Store concise host health facts
+          ansible.builtin.set_fact:
+            k3s_health_memory_threshold: "{{ k3s_health_memory_warning_percent }}"
+            k3s_health_root_threshold: "{{ k3s_health_root_warning_percent }}"
+            k3s_health_host_report:
+              ssh: REACHABLE
+              k3s: "{{ k3s_health_service.stdout | trim | default('unknown', true) }}"
+              version: "{{ k3s_health_version.stdout_lines | default(['unavailable']) | first }}"
+              api_etcd: >-
+                {{ 'READY' if k3s_health_readyz.rc == 0
+                   and 'readyz check passed' in k3s_health_readyz.stdout
+                   and '[+]etcd ok' in k3s_health_readyz.stdout else 'NOT_READY' }}
+              failed_units: "{{ k3s_health_failed_units.stdout_lines | length }}"
+              reboot_required: "{{ 'YES' if k3s_health_reboot_marker.stat.exists else 'NO' }}"
+              memory_used_percent: "{{ k3s_health_memory_used_percent }}"
+              root_used_percent: "{{ k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int }}"
+            k3s_health_host_critical: >-
+              {{ k3s_health_service.stdout | trim != 'active'
+                 or k3s_health_readyz.rc != 0
+                 or 'readyz check passed' not in k3s_health_readyz.stdout
+                 or '[+]etcd ok' not in k3s_health_readyz.stdout }}
+            k3s_health_host_warning: >-
+              {{ k3s_health_failed_units.stdout_lines | length > 0
+                 or k3s_health_reboot_marker.stat.exists
+                 or k3s_health_memory_used_percent | float >= k3s_health_memory_warning_percent
+                 or (k3s_health_root_df.stdout_lines | last | regex_replace('[^0-9]', '') | int)
+                    >= k3s_health_root_warning_percent }}
+      rescue:
+        - name: Show partial health summary
+          ansible.builtin.include_tasks: ../../tasks/k3s-health-summary.yml
+          run_once: true
+
+        - name: Preserve the audit collection failure
+          ansible.builtin.fail:
+            msg: Health collection failed; review the failed task and partial summary.
+
 
 - name: Read the Kubernetes Node set from the reachable master
   hosts: k3s_health_master
@@ -165,45 +189,56 @@
   vars:
     k3s_binary_path: /usr/local/bin/k3s
   tasks:
-    - name: Read Kubernetes Node names
-      ansible.builtin.command:
-        argv:
-          - "{{ k3s_binary_path }}"
-          - kubectl
-          - get
-          - nodes
-          - --no-headers
-          - --output=custom-columns=NAME:.metadata.name
-      register: k3s_health_node_names
-      changed_when: false
+    - name: Run basic health audit
+      block:
+        - name: Read Kubernetes Node names
+          ansible.builtin.command:
+            argv:
+              - "{{ k3s_binary_path }}"
+              - kubectl
+              - get
+              - nodes
+              - --no-headers
+              - --output=custom-columns=NAME:.metadata.name
+          register: k3s_health_node_names
+          changed_when: false
 
-    - name: Validate and store Kubernetes Node names
-      ansible.builtin.include_tasks: ../../tasks/k3s-node-names.yml
-      vars:
-        k3s_node_name_result: "{{ k3s_health_node_names }}"
-        k3s_node_name_fact: k3s_health_live_node_names
+        - name: Validate and store Kubernetes Node names
+          ansible.builtin.include_tasks: ../../tasks/k3s-node-names.yml
+          vars:
+            k3s_node_name_result: "{{ k3s_health_node_names }}"
+            k3s_node_name_fact: k3s_health_live_node_names
 
-    - name: Read the Ready condition for every Kubernetes Node
-      ansible.builtin.command:
-        argv:
-          - "{{ k3s_binary_path }}"
-          - kubectl
-          - get
-          - node
-          - "{{ item }}"
-          - '--output=jsonpath={.status.conditions[?(@.type=="Ready")].status}'
-      loop: "{{ k3s_health_live_node_names }}"
-      loop_control:
-        label: "{{ item }}"
-      register: k3s_health_node_ready_results
-      changed_when: false
+        - name: Read the Ready condition for every Kubernetes Node
+          ansible.builtin.command:
+            argv:
+              - "{{ k3s_binary_path }}"
+              - kubectl
+              - get
+              - node
+              - "{{ item }}"
+              - '--output=jsonpath={.status.conditions[?(@.type=="Ready")].status}'
+          loop: "{{ k3s_health_live_node_names }}"
+          loop_control:
+            label: "{{ item }}"
+          register: k3s_health_node_ready_results
+          changed_when: false
 
-    - name: Validate and store non-Ready Kubernetes Nodes
-      ansible.builtin.include_tasks: ../../tasks/k3s-node-ready-results.yml
-      vars:
-        k3s_node_ready_results: "{{ k3s_health_node_ready_results }}"
-        k3s_node_names: "{{ k3s_health_live_node_names }}"
-        k3s_not_ready_fact: k3s_health_not_ready_nodes
+        - name: Validate and store non-Ready Kubernetes Nodes
+          ansible.builtin.include_tasks: ../../tasks/k3s-node-ready-results.yml
+          vars:
+            k3s_node_ready_results: "{{ k3s_health_node_ready_results }}"
+            k3s_node_names: "{{ k3s_health_live_node_names }}"
+            k3s_not_ready_fact: k3s_health_not_ready_nodes
+      rescue:
+        - name: Show partial health summary
+          ansible.builtin.include_tasks: ../../tasks/k3s-health-summary.yml
+          run_once: true
+
+        - name: Preserve the audit collection failure
+          ansible.builtin.fail:
+            msg: Health collection failed; review the failed task and partial summary.
+
 
 - name: Report and enforce basic health policy
   hosts: localhost
@@ -213,65 +248,47 @@
   vars:
     k3s_health_mode: report
   tasks:
-    - name: Report each inventory host
-      ansible.builtin.debug:
-        msg:
-          host: "{{ item }}"
-          health: >-
-            {{ hostvars[item].k3s_health_host_report
-               | default({'ssh': 'UNREACHABLE'}) }}
-      loop: "{{ groups.k3s_cluster }}"
-      loop_control:
-        label: "{{ item }}"
+    - name: Run basic health audit
+      block:
+        - name: Require readable cluster data
+          ansible.builtin.assert:
+            that:
+              - groups.k3s_health_master | default([]) | length == 1
+              - hostvars[groups.masters | first].k3s_health_live_node_names is defined
+            fail_msg: Basic Health could not read and parse the cluster Node state.
 
-    - name: Require readable cluster data
-      ansible.builtin.assert:
-        that:
-          - groups.k3s_health_master | default([]) | length == 1
-          - hostvars[groups.masters | first].k3s_health_live_node_names is defined
-        fail_msg: Basic Health could not read and parse the cluster Node state.
+        - name: Build concise cluster findings
+          ansible.builtin.set_fact:
+            k3s_expected_node_names: "{{ groups.k3s_cluster }}"
+            k3s_live_node_names: "{{ hostvars[groups.masters | first].k3s_health_live_node_names }}"
+            k3s_not_ready_nodes: "{{ hostvars[groups.masters | first].k3s_health_not_ready_nodes }}"
+            k3s_unreachable_hosts: >-
+              {{ groups.k3s_cluster | difference(groups.k3s_health_reachable | default([])) }}
+            k3s_critical_hosts: "{{ [] }}"
+            k3s_warning_hosts: "{{ [] }}"
 
-    - name: Build concise cluster findings
-      ansible.builtin.set_fact:
-        k3s_expected_node_names: "{{ groups.k3s_cluster }}"
-        k3s_live_node_names: "{{ hostvars[groups.masters | first].k3s_health_live_node_names }}"
-        k3s_not_ready_nodes: "{{ hostvars[groups.masters | first].k3s_health_not_ready_nodes }}"
-        k3s_unreachable_hosts: >-
-          {{ groups.k3s_cluster | difference(groups.k3s_health_reachable | default([])) }}
-        k3s_critical_hosts: "{{ [] }}"
-        k3s_warning_hosts: "{{ [] }}"
+        - name: Build warning and critical host lists
+          ansible.builtin.set_fact:
+            k3s_critical_hosts: >-
+              {{ k3s_critical_hosts
+                 + ([item] if hostvars[item].k3s_health_host_critical | default(true) | bool else []) }}
+            k3s_warning_hosts: >-
+              {{ k3s_warning_hosts | default([])
+                 + ([item] if hostvars[item].k3s_health_host_warning | default(false) | bool else []) }}
+          loop: "{{ groups.k3s_health_reachable | default([]) }}"
+          loop_control:
+            label: "{{ item }}"
 
-    - name: Build warning and critical host lists
-      ansible.builtin.set_fact:
-        k3s_critical_hosts: >-
-          {{ k3s_critical_hosts
-             + ([item] if hostvars[item].k3s_health_host_critical | default(true) | bool else []) }}
-        k3s_warning_hosts: >-
-          {{ k3s_warning_hosts | default([])
-             + ([item] if hostvars[item].k3s_health_host_warning | default(false) | bool else []) }}
-      loop: "{{ groups.k3s_health_reachable | default([]) }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Report cluster summary
-      ansible.builtin.debug:
-        msg:
-          mode: "{{ k3s_health_mode }}"
-          api: READY
-          nodes_missing: "{{ k3s_expected_node_names | difference(k3s_live_node_names) }}"
-          nodes_unexpected: "{{ k3s_live_node_names | difference(k3s_expected_node_names) }}"
-          nodes_not_ready: "{{ k3s_not_ready_nodes }}"
-          unreachable_hosts: "{{ k3s_unreachable_hosts }}"
-          critical_hosts: "{{ k3s_critical_hosts }}"
-          warning_hosts: "{{ k3s_warning_hosts | default([]) }}"
-
-    - name: Enforce strict mode only
-      ansible.builtin.assert:
-        that:
-          - k3s_health_mode != 'strict' or k3s_unreachable_hosts | length == 0
-          - k3s_health_mode != 'strict' or k3s_critical_hosts | length == 0
-          - k3s_health_mode != 'strict' or k3s_warning_hosts | default([]) | length == 0
-          - k3s_health_mode != 'strict' or k3s_expected_node_names | difference(k3s_live_node_names) | length == 0
-          - k3s_health_mode != 'strict' or k3s_live_node_names | difference(k3s_expected_node_names) | length == 0
-          - k3s_health_mode != 'strict' or k3s_not_ready_nodes | length == 0
-        fail_msg: Strict K3s health detected critical problems or warnings.
+        - name: Enforce strict mode only
+          ansible.builtin.assert:
+            that:
+              - k3s_health_mode != 'strict' or k3s_unreachable_hosts | length == 0
+              - k3s_health_mode != 'strict' or k3s_critical_hosts | length == 0
+              - k3s_health_mode != 'strict' or k3s_warning_hosts | default([]) | length == 0
+              - k3s_health_mode != 'strict' or k3s_expected_node_names | difference(k3s_live_node_names) | length == 0
+              - k3s_health_mode != 'strict' or k3s_live_node_names | difference(k3s_expected_node_names) | length == 0
+              - k3s_health_mode != 'strict' or k3s_not_ready_nodes | length == 0
+            fail_msg: Strict K3s health detected critical problems or warnings.
+      always:
+        - name: Show final health summary
+          ansible.builtin.include_tasks: ../../tasks/k3s-health-summary.yml

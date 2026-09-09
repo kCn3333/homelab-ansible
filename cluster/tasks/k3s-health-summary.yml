@@ -1,0 +1,6 @@
+---
+- name: K3s health summary
+  ansible.builtin.debug:
+    msg: "{{ lookup('ansible.builtin.template', '../templates/k3s-health-summary.j2').splitlines() }}"
+  delegate_to: localhost
+  become: false

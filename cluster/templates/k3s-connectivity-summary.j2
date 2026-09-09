@@ -1,0 +1,10 @@
+{% set nodes = ansible_play_hosts_all %}
+{% set width = ([4] + (nodes | map('length') | list)) | max %}
+K3S CONNECTIVITY SUMMARY
+{{ ('%-' ~ width ~ 's') | format('Host') }} | Ansible connectivity
+{% for node in nodes %}
+{% set result = hostvars[node].get('k3s_connectivity_audit', {}) %}
+{{ ('%-' ~ width ~ 's') | format(node) }} | {% if not result or result.skipped | default(false) %}NOT CHECKED{% elif result.unreachable | default(false) or result.failed | default(false) or result.get('ping') != 'pong' %}FAILED{% else %}OK{% endif %}
+
+{% endfor %}
+Scope: Ansible connectivity only; service and cluster health were not checked.

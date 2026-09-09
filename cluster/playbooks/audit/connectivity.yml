@@ -3,11 +3,24 @@
   hosts: k3s_servers
   gather_facts: false
   tasks:
-    - name: Check Ansible connectivity
-      ansible.builtin.ping:
+    - name: Check and report Ansible connectivity
+      block:
+        - name: Check Ansible connectivity
+          ansible.builtin.ping:
+          register: k3s_connectivity_audit
+          ignore_unreachable: true
 
-    - name: Report reachable host
-      ansible.builtin.debug:
-        msg: >-
-          Connected to {{ inventory_hostname }} at {{ ansible_host }} on SSH
-          port {{ ansible_port | default('selected by the SSH transport') }}.
+        - name: Require confirmed Ansible connectivity
+          ansible.builtin.assert:
+            that:
+              - not (k3s_connectivity_audit.unreachable | default(false))
+              - k3s_connectivity_audit.ping | default('') == 'pong'
+          delegate_to: localhost
+          become: false
+      always:
+        - name: K3s connectivity summary
+          ansible.builtin.debug:
+            msg: "{{ lookup('ansible.builtin.template', '../../templates/k3s-connectivity-summary.j2').splitlines() }}"
+          delegate_to: localhost
+          become: false
+          run_once: true
