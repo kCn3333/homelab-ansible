@@ -1,0 +1,25 @@
+---
+- name: Allow TCP services from this inventory node
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ k3s_ufw_port.port }}"
+    proto: tcp
+    comment: "K3s managed: {{ k3s_ufw_port.comment }}"
+  loop:
+    - {port: '6443', comment: 'server API'}
+    - {port: '2379', comment: 'etcd client'}
+    - {port: '2380', comment: 'etcd peer'}
+    - {port: '10250', comment: 'kubelet'}
+    - {port: '4240', comment: 'Cilium health'}
+    - {port: '4244', comment: 'Hubble'}
+  loop_control:
+    loop_var: k3s_ufw_port
+
+- name: Allow Cilium VXLAN from this inventory node
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: '8472'
+    proto: udp
+    comment: 'K3s managed: Cilium VXLAN'

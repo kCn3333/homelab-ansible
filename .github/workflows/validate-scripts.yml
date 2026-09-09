@@ -23,6 +23,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep shellcheck
           python3 -m pip install --disable-pip-version-check 'ansible-core==2.20.7'
+          ansible-galaxy collection install -r collections/requirements.yml
 
       - name: Check Bash syntax
         run: bash -n scripts/*.sh tests/*.sh
@@ -49,6 +50,7 @@ jobs:
           python3 tests/test-send-wol.py
           python3 tests/test-check-longhorn-restore.py
           python3 tests/test-k3s-lifecycle.py
+          python3 tests/test-k3s-ufw.py
           ansible-playbook -i localhost, --connection=local tests/test-k3s-node-state-collection.yml
 
       - name: Compile Python helpers

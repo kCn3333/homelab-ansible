@@ -31,6 +31,8 @@ Node names. No concrete private values belong in this repository.
   the existing WOL VLAN on the explicit gateway, sends WoL to every node, deactivates it,
   then verifies host, API, etcd, and exact Ready Node state without changing
   scheduling.
+- `playbooks/power/k3s-ufw.yml`: configures UFW from private inventory and
+  verifies K3s and Node readiness; see [requirements](../docs/k3s-ufw.md).
 - `playbooks/power/k3s-power-off.yml`: requires full-cluster scope and two
   confirmations, checks exact Ready Nodes plus active Longhorn backup/restore
   safety, then requests poweroff for `workers` sequentially and `masters` last;

@@ -1,0 +1,129 @@
+---
+- name: Validate UFW inventory even when the cluster group is missing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Validate complete private inventory
+      ansible.builtin.import_tasks: ../../tasks/k3s-ufw-inventory.yml
+
+- name: Configure UFW and verify K3s readiness
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  strategy: linear
+  any_errors_fatal: true
+  pre_tasks:
+    # Repeat here because --limit can exclude the localhost play.
+    - name: Validate complete private inventory before connecting
+      ansible.builtin.import_tasks: ../../tasks/k3s-ufw-inventory.yml
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+  tasks:
+    # The Semaphore SSH connection must originate in this management network.
+    - name: Allow management SSH before other firewall changes
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ k3s_management_cidr }}"
+        port: '22'
+        proto: tcp
+        comment: 'K3s managed: management SSH'
+
+    - name: Allow HAProxy to Traefik and Kubernetes API
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ k3s_haproxy_ip }}"
+        port: "{{ item }}"
+        proto: tcp
+        comment: 'K3s managed: HAProxy ingress and API'
+      loop: ['80', '443', '6443']
+
+    - name: Allow each inventory node to communicate with this server
+      ansible.builtin.include_tasks: ../../tasks/k3s-ufw-peer.yml
+      loop: "{{ groups.k3s_cluster }}"
+
+    - name: Allow Pod and Service source traffic
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item.source }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - source: "{{ k3s_pod_cidr }}"
+          comment: 'K3s managed: Pod CIDR'
+        - source: "{{ k3s_service_cidr }}"
+          comment: 'K3s managed: Service CIDR'
+
+    - name: Reject ident with logging
+      community.general.ufw:
+        rule: reject
+        port: '113'
+        proto: tcp
+        log: true
+        comment: 'K3s managed: reject ident with logging'
+
+    - name: Delete only explicitly declared obsolete rules by specification
+      community.general.ufw:
+        delete: true
+        rule: "{{ item.rule }}"
+        from_ip: "{{ item.from_ip }}"
+        to_ip: "{{ item.to_ip | default(omit) }}"
+        port: "{{ item.port | default(omit) }}"
+        proto: "{{ item.proto | default(omit) }}"
+      loop: "{{ k3s_ufw_obsolete_rules | default([]) }}"
+      no_log: true
+
+    # Module operations apply their changes immediately. No extra reload needed.
+    # Existing default policies and unrelated rules remain unchanged.
+    - name: Ensure UFW is enabled and collect its resulting status
+      community.general.ufw:
+        state: enabled
+      environment:
+        LC_ALL: C
+      register: k3s_ufw_status
+
+    - name: Require active UFW from the module status result
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in k3s_ufw_status.msg"
+        fail_msg: UFW did not report active status.
+      when: not ansible_check_mode
+
+    - name: Verify K3s and Kubernetes Nodes after applying UFW
+      when: not ansible_check_mode
+      block:
+        - name: Read service state on every server
+          ansible.builtin.service_facts:
+
+        - name: Require the K3s server service to be running
+          ansible.builtin.assert:
+            that:
+              - ansible_facts.services.get('k3s.service', {}).get('state', '') == 'running'
+
+        - name: Wait for Ready Nodes through each server's local kubeconfig
+          kubernetes.core.k8s_info:
+            kubeconfig: /etc/rancher/k3s/k3s.yaml
+            kind: Node
+            name: "{{ item }}"
+            wait: true
+            wait_condition:
+              type: Ready
+              status: 'True'
+            wait_timeout: 300
+          loop: "{{ groups.k3s_cluster }}"
+          register: k3s_ufw_nodes
+          no_log: true
+
+        - name: Require every expected Node to exist and be Ready
+          ansible.builtin.assert:
+            that:
+              - item.resources | length == 1
+              - >-
+                item.resources[0].status.conditions
+                | selectattr('type', 'equalto', 'Ready')
+                | selectattr('status', 'equalto', 'True') | list | length == 1
+          loop: "{{ k3s_ufw_nodes.results }}"
+          no_log: true
