@@ -11,7 +11,7 @@ PLAYBOOK = ROOT / "cluster/playbooks/power/k3s-ufw.yml"
 REQUIRED_VARS = ("k3s_management_cidr", "k3s_haproxy_ip",
                  "k3s_additional_ingress_ips", "k3s_cluster_cidr", "k3s_pod_cidr")
 REQUIRED_PORTS = ("22", "6443", "80", "443", "10250", "2379", "2380",
-                  "9100", "4443", "4244", "4240", "8472", "51820", "123", "113")
+                  "9100", "9090", "4443", "4244", "4240", "8472", "51820", "123", "113")
 
 
 class UfwContractTest(unittest.TestCase):

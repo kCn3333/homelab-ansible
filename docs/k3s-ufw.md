@@ -15,7 +15,7 @@ Playbook: `cluster/playbooks/power/k3s-ufw.yml`.
 
 - management: `22/tcp allow`;
 - HAProxy and additional ingress: `6443/tcp`, `80/tcp`, `443/tcp`;
-- cluster TCP: `6443`, `10250`, `2379`, `2380`, `9100`, `4443`, `4244`, `4240`;
+- cluster TCP: `6443`, `10250`, `2379`, `2380`, `9100`, `9090`, `4443`, `4244`, `4240`;
 - cluster UDP: `8472`, `51820`, `123`;
 - Pod CIDR: allow all;
 - ident: `113/tcp reject log`;

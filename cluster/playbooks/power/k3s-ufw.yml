@@ -55,7 +55,7 @@
         from_ip: "{{ k3s_cluster_cidr }}"
         port: "{{ item }}"
         proto: tcp
-      loop: ['6443', '10250', '2379', '2380', '9100', '4443', '4244', '4240']
+      loop: ['6443', '10250', '2379', '2380', '9100', '9090', '4443', '4244', '4240']
 
     - name: Allow K3s cluster UDP traffic
       community.general.ufw:
