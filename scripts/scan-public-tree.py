@@ -21,6 +21,7 @@ FIXTURE_FILE = pathlib.PurePosixPath("tests/test-send-wol.py")
 FIXTURE_ADDRESSES = {"0.0.0.0", "127.0.0.1", "::1"}
 FIXTURE_MAC_NEGATIVES = {"02:11:22:33:44", "02:11-22:33:44:55"}
 PUBLIC_API_GROUPS = ("toolkit.fluxcd.io", "longhorn.io", "postgresql.cnpg.io")
+PUBLIC_URL_PREFIXES = ("https://github.com/k3s-io/k3s/releases/download/",)
 
 
 def iter_files(paths: list[str]):
@@ -71,6 +72,8 @@ def main(argv: list[str]) -> int:
         domain_text = text
         for api_group in PUBLIC_API_GROUPS:
             domain_text = domain_text.replace(api_group, "public-api-group")
+        for url_prefix in PUBLIC_URL_PREFIXES:
+            domain_text = domain_text.replace(url_prefix, "public-release-source/")
         if DOMAIN.search(domain_text):
             categories.add("unexpected-domain-or-url")
         for category in categories:
