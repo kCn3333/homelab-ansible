@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Structural safety checks for K3s playbooks; runs no managed-host tasks."""
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -23,6 +24,8 @@ class LifecycleTests(unittest.TestCase):
     def setUpClass(cls):
         cls.on_text, cls.on = load("cluster/playbooks/power/k3s-power-on.yml")
         cls.off_text, cls.off = load("cluster/playbooks/power/k3s-power-off.yml")
+        cls.upgrade_text, cls.upgrade = load(
+            "cluster/playbooks/maintenance/k3s-upgrade.yml")
 
     def test_power_on_scope_and_recovery(self):
         self.assertEqual(self.on[0]["hosts"], "localhost")
@@ -114,6 +117,89 @@ class LifecycleTests(unittest.TestCase):
         wrapper = plays[-1]["tasks"][0]
         self.assertEqual(wrapper["always"][0]["ansible.builtin.include_tasks"],
                          "../../tasks/k3s-health-summary.yml")
+
+    def test_upgrade_preflight_is_complete_and_fail_closed(self):
+        validation = self.upgrade[0]
+        self.assertEqual(validation["hosts"], "k3s_cluster")
+        scope = "\n".join(validation["tasks"][0]["ansible.builtin.assert"]["that"])
+        for value in ("k3s_target_version", "ansible_limit",
+                      "groups.masters | default([]) | length == 1",
+                      "groups.workers | default([]) | length == 2",
+                      "groups.k3s_cluster | default([]) | length == 3"):
+            self.assertIn(value, scope)
+        transition = self.upgrade[2]
+        transition_text = str(transition)
+        for value in ("version(k3s_current_normalized, '>=')",
+                      "All K3s servers must start on the same version",
+                      "groups.workers + groups.masters"):
+            self.assertIn(value, transition_text)
+        preflight_text = str(self.upgrade[1])
+        for value in ("/usr/local/bin/k3s", "--version", "k3s.service",
+                      "--raw=/readyz?verbose", "readyz check passed", "[+]etcd ok",
+                      "uname", "x86_64"):
+            self.assertIn(value, preflight_text)
+
+        readyz_tasks = [task for task in self.upgrade[1]["tasks"]
+                        if task["name"] == "Require local API and etcd readiness"]
+        rolling_tasks = self.upgrade[4]["tasks"][0]["block"]
+        readyz_tasks += [task for task in rolling_tasks
+                         if task["name"] == "Wait for local API and etcd readiness"]
+        self.assertEqual(len(readyz_tasks), 2)
+        for task in readyz_tasks:
+            self.assertIn("--request-timeout=10s",
+                          task["ansible.builtin.command"]["argv"])
+
+    def test_upgrade_snapshot_order_and_binary_verification(self):
+        snapshot, rolling = self.upgrade[3:5]
+        self.assertEqual(snapshot["hosts"], "masters")
+        self.assertIn("etcd-snapshot", str(snapshot))
+        self.assertIn("pre-k3s-upgrade-", str(snapshot))
+        self.assertEqual((rolling["hosts"], rolling["serial"], rolling["order"]),
+                         ("k3s_upgrade_order", 1, "inventory"))
+        text = str(rolling)
+        for value in ("sha256sum-amd64.txt", "checksum", "remote_src", "backup",
+                      "k3s.service", "node/{{ inventory_hostname }}"):
+            self.assertIn(value, text)
+        install = next(task for task in rolling["tasks"][0]["block"]
+                       if task["name"] == "Atomically replace the K3s binary and keep a backup")
+        self.assertTrue(install["ansible.builtin.copy"]["backup"])
+        self.assertEqual(install["ansible.builtin.copy"]["mode"], "0755")
+        self.assertEqual(install["register"], "k3s_upgrade_binary_install")
+        backup_report = next(task for task in rolling["tasks"][0]["block"]
+                             if task["name"] == "Report the retained K3s binary backup")
+        self.assertIn("k3s_upgrade_binary_install.backup_file", str(backup_report))
+
+        checksum = next(task for task in rolling["tasks"][0]["block"]
+                        if task["name"] == "Extract the official K3s binary checksum")
+        expression = checksum["ansible.builtin.set_fact"]["k3s_upgrade_binary_checksums"]
+        pattern = re.search(r"regex_findall\('([^']+)'\)", expression).group(1)
+        digest = "a" * 64
+        self.assertEqual(re.findall(pattern, f"{digest}  k3s"), [digest])
+
+    def test_upgrade_final_checks_cover_membership_and_proxy_matrix(self):
+        servers, cluster = self.upgrade[5:]
+        for play in (servers, cluster):
+            self.assertTrue(all("ansible.builtin.meta" not in task
+                                for task in play["tasks"]))
+        proxy = next(task for task in servers["tasks"]
+                     if task["name"] == "Verify the local API server can proxy to every kubelet")
+        self.assertEqual(proxy["loop"], "{{ groups.k3s_cluster }}")
+        self.assertEqual(proxy["until"], ["k3s_upgrade_kubelet_proxy.rc == 0",
+                                          "k3s_upgrade_kubelet_proxy.stdout | trim == 'ok'"])
+        self.assertEqual((proxy["retries"], proxy["delay"]), (30, 2))
+        self.assertIn("--raw=/api/v1/nodes/{{ item }}/proxy/healthz",
+                      proxy["ansible.builtin.command"]["argv"])
+        self.assertIn("Require exact Kubernetes Node membership", str(cluster))
+        self.assertIn("Require every Kubernetes Node to be Ready", str(cluster))
+
+    def test_upgrade_does_not_cross_safety_boundaries(self):
+        lowered = self.upgrade_text.lower()
+        for value in ("get.k3s" + ".io", "k3s_version: latest", "ansible.builtin.shell",
+                      "ignore_errors", "execstart", "/etc/rancher/k3s", "token",
+                      "kubeconfig", "remotedialer", "cordon", "drain", "cilium",
+                      "flux", "kube-proxy", "community.general.ufw"):
+            self.assertNotIn(value, lowered)
+        self.assertEqual(lowered.count("state: restarted"), 1)
 
 
 if __name__ == "__main__":

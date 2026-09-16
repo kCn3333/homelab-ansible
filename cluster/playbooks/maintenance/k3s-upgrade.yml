@@ -1,0 +1,397 @@
+---
+- name: Validate the controlled K3s upgrade request
+  hosts: k3s_cluster
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require an explicit version complete inventory and no limit
+      ansible.builtin.assert:
+        that:
+          - k3s_target_version | default('') | string is match('^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$')
+          - ansible_limit is not defined or ansible_limit | trim | length == 0
+          - "'masters' in groups"
+          - "'workers' in groups"
+          - "'k3s_cluster' in groups"
+          - groups.masters | default([]) | length == 1
+          - groups.workers | default([]) | length == 2
+          - groups.k3s_cluster | default([]) | length == 3
+          - groups.masters | default([]) | intersect(groups.workers | default([])) | length == 0
+          - groups.k3s_cluster | default([]) | unique | length == 3
+          - groups.k3s_cluster | default([]) | sort == (groups.workers | default([]) + groups.masters | default([])) | sort
+        fail_msg: >-
+          K3s upgrade requires k3s_target_version as a full release such as
+          v1.34.10+k3s1, the complete 1 master and 2 worker inventory, and no --limit.
+      run_once: true
+      delegate_to: localhost
+
+
+- name: Run non-mutating preflight on every K3s server
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+  tasks:
+    - name: Check the K3s binary
+      ansible.builtin.stat:
+        path: "{{ k3s_binary_path }}"
+      register: k3s_upgrade_binary
+
+    - name: Require an executable regular K3s binary
+      ansible.builtin.assert:
+        that:
+          - k3s_upgrade_binary.stat.exists
+          - k3s_upgrade_binary.stat.isreg
+          - k3s_upgrade_binary.stat.executable
+        fail_msg: The expected K3s binary is missing or not executable.
+
+    - name: Read the machine architecture
+      ansible.builtin.command:
+        argv: [uname, -m]
+      register: k3s_upgrade_architecture
+      changed_when: false
+
+    - name: Require x86_64 for the amd64 release artifact
+      ansible.builtin.assert:
+        that:
+          - k3s_upgrade_architecture.rc == 0
+          - k3s_upgrade_architecture.stdout | trim == 'x86_64'
+        fail_msg: The controlled upgrade supports only x86_64 K3s servers.
+
+    - name: Read the installed K3s version
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", --version]
+      register: k3s_upgrade_version_output
+      changed_when: false
+
+    - name: Require one parseable installed K3s version
+      ansible.builtin.assert:
+        that:
+          - >-
+            k3s_upgrade_version_output.stdout
+            | regex_findall('(?m)^k3s version (v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+)(?: |$)')
+            | length == 1
+        fail_msg: The installed K3s version could not be parsed safely.
+
+    - name: Store the installed K3s version
+      ansible.builtin.set_fact:
+        k3s_current_version: >-
+          {{ (k3s_upgrade_version_output.stdout
+              | regex_findall('(?m)^k3s version (v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+)(?: |$)'))
+             | first }}
+
+    - name: Require active K3s service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, k3s.service]
+      register: k3s_upgrade_service
+      changed_when: false
+      failed_when: >-
+        k3s_upgrade_service.rc != 0
+        or k3s_upgrade_service.stdout | trim != 'active'
+
+    - name: Require local API and etcd readiness
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, --request-timeout=10s, get, "--raw=/readyz?verbose"]
+      register: k3s_upgrade_readyz
+      changed_when: false
+      failed_when: >-
+        k3s_upgrade_readyz.rc != 0
+        or 'readyz check passed' not in k3s_upgrade_readyz.stdout
+        or '[+]etcd ok' not in k3s_upgrade_readyz.stdout
+
+
+- name: Validate the cluster version transition and build upgrade order
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Collect current K3s versions
+      ansible.builtin.set_fact:
+        k3s_current_versions: >-
+          {{ groups.k3s_cluster | map('extract', hostvars, 'k3s_current_version') | list }}
+
+    - name: Require one starting version across the cluster
+      ansible.builtin.assert:
+        that:
+          - k3s_current_versions | unique | length == 1
+        fail_msg: All K3s servers must start on the same version.
+
+    - name: Parse current and target K3s versions
+      ansible.builtin.set_fact:
+        k3s_current_version: "{{ k3s_current_versions | first }}"
+        k3s_current_parts: >-
+          {{ (k3s_current_versions | first)
+             | regex_findall('^v([0-9]+)\.([0-9]+)\.([0-9]+)\+k3s([0-9]+)$') }}
+        k3s_target_parts: >-
+          {{ k3s_target_version
+             | regex_findall('^v([0-9]+)\.([0-9]+)\.([0-9]+)\+k3s([0-9]+)$') }}
+        k3s_current_normalized: >-
+          {{ k3s_current_versions | first | regex_replace('^v', '') | regex_replace('\+k3s', '.') }}
+        k3s_target_normalized: >-
+          {{ k3s_target_version | regex_replace('^v', '') | regex_replace('\+k3s', '.') }}
+        k3s_safe_target_version: "{{ k3s_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
+
+    - name: Reject downgrade or an unsupported version jump
+      ansible.builtin.assert:
+        that:
+          - k3s_current_parts | length == 1
+          - k3s_target_parts | length == 1
+          - k3s_target_normalized is version(k3s_current_normalized, '>=')
+          - k3s_target_parts[0][0] | int == k3s_current_parts[0][0] | int
+          - k3s_target_parts[0][1] | int >= k3s_current_parts[0][1] | int
+          - (k3s_target_parts[0][1] | int) - (k3s_current_parts[0][1] | int) <= 1
+        fail_msg: K3s downgrade and jumps over more than one minor version are not allowed.
+
+    - name: Record whether an upgrade is required
+      ansible.builtin.set_fact:
+        k3s_upgrade_required: "{{ k3s_current_version != k3s_target_version }}"
+
+    - name: Report an already completed upgrade
+      ansible.builtin.debug:
+        msg: "All K3s servers already run {{ k3s_target_version }}; no changes are required."
+      when: not (k3s_upgrade_required | bool)
+
+    - name: Build worker-first upgrade group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: k3s_upgrade_order
+      loop: "{{ groups.workers + groups.masters }}"
+      changed_when: false
+      when: k3s_upgrade_required | bool
+
+
+- name: Save one embedded etcd snapshot before binary replacement
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+  tasks:
+    - name: End snapshot stage when every server is already current
+      ansible.builtin.meta: end_play
+      when: not (hostvars.localhost.k3s_upgrade_required | bool)
+
+    - name: Save the pre-upgrade embedded etcd snapshot
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary_path }}"
+          - etcd-snapshot
+          - save
+          - --name
+          - "pre-k3s-upgrade-{{ hostvars.localhost.k3s_safe_target_version }}"
+      changed_when: true
+
+
+- name: Upgrade K3s servers one at a time in worker-first order
+  hosts: k3s_upgrade_order
+  gather_facts: false
+  become: true
+  serial: 1
+  order: inventory
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+    k3s_release_url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_target_version }}"
+    k3s_upgrade_retries: 150
+    k3s_upgrade_delay: 2
+  tasks:
+    - name: Download verify and install the target binary
+      block:
+        - name: Create a temporary upgrade directory
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: k3s-upgrade-
+          register: k3s_upgrade_tempdir
+
+        - name: Download the official amd64 checksum list
+          ansible.builtin.get_url:
+            url: "{{ k3s_release_url }}/sha256sum-amd64.txt"
+            dest: "{{ k3s_upgrade_tempdir.path }}/sha256sum-amd64.txt"
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Read the official amd64 checksum list
+          ansible.builtin.slurp:
+            src: "{{ k3s_upgrade_tempdir.path }}/sha256sum-amd64.txt"
+          register: k3s_upgrade_checksums
+
+        - name: Extract the official K3s binary checksum
+          ansible.builtin.set_fact:
+            k3s_upgrade_binary_checksums: >-
+              {{ k3s_upgrade_checksums.content | b64decode
+                 | regex_findall('(?m)^([a-f0-9]{64})[ \t]+\*?k3s$') }}
+
+        - name: Require exactly one official K3s binary checksum
+          ansible.builtin.assert:
+            that:
+              - k3s_upgrade_binary_checksums | length == 1
+            fail_msg: The official checksum list has no unique K3s amd64 binary entry.
+
+        - name: Download and verify the target K3s binary
+          ansible.builtin.get_url:
+            url: "{{ k3s_release_url }}/k3s"
+            dest: "{{ k3s_upgrade_tempdir.path }}/k3s"
+            checksum: "sha256:{{ k3s_upgrade_binary_checksums | first }}"
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Atomically replace the K3s binary and keep a backup
+          ansible.builtin.copy:
+            src: "{{ k3s_upgrade_tempdir.path }}/k3s"
+            dest: "{{ k3s_binary_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+            backup: true
+          register: k3s_upgrade_binary_install
+
+        - name: Report the retained K3s binary backup
+          ansible.builtin.debug:
+            msg: "Previous K3s binary backup: {{ k3s_upgrade_binary_install.backup_file }}"
+          when:
+            - k3s_upgrade_binary_install.backup_file is defined
+            - k3s_upgrade_binary_install.backup_file | string | length > 0
+
+        - name: Restart only the K3s service
+          ansible.builtin.systemd_service:
+            name: k3s.service
+            state: restarted
+
+        - name: Wait for active K3s service
+          ansible.builtin.command:
+            argv: [systemctl, is-active, k3s.service]
+          register: k3s_upgrade_service_after
+          changed_when: false
+          until:
+            - k3s_upgrade_service_after.rc == 0
+            - k3s_upgrade_service_after.stdout | trim == 'active'
+          retries: "{{ k3s_upgrade_retries }}"
+          delay: "{{ k3s_upgrade_delay }}"
+
+        - name: Wait for local API and etcd readiness
+          ansible.builtin.command:
+            argv: ["{{ k3s_binary_path }}", kubectl, --request-timeout=10s, get, "--raw=/readyz?verbose"]
+          register: k3s_upgrade_readyz_after
+          changed_when: false
+          until:
+            - k3s_upgrade_readyz_after.rc == 0
+            - "'readyz check passed' in k3s_upgrade_readyz_after.stdout"
+            - "'[+]etcd ok' in k3s_upgrade_readyz_after.stdout"
+          retries: "{{ k3s_upgrade_retries }}"
+          delay: "{{ k3s_upgrade_delay }}"
+
+        - name: Confirm the installed target version
+          ansible.builtin.command:
+            argv: ["{{ k3s_binary_path }}", --version]
+          register: k3s_upgrade_version_after
+          changed_when: false
+          failed_when: >-
+            k3s_upgrade_version_after.rc != 0
+            or ('k3s version ' ~ k3s_target_version ~ ' ') not in k3s_upgrade_version_after.stdout
+
+        - name: Wait for the updated Kubernetes Node to be Ready
+          ansible.builtin.command:
+            argv:
+              - "{{ k3s_binary_path }}"
+              - kubectl
+              - wait
+              - --for=condition=Ready
+              - "node/{{ inventory_hostname }}"
+              - --timeout=300s
+          changed_when: false
+      always:
+        - name: Remove temporary upgrade files
+          ansible.builtin.file:
+            path: "{{ k3s_upgrade_tempdir.path }}"
+            state: absent
+          when:
+            - k3s_upgrade_tempdir is defined
+            - k3s_upgrade_tempdir.path is defined
+
+
+- name: Verify target version and the full kubelet proxy matrix
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+  tasks:
+    - name: Confirm the final K3s version
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", --version]
+      register: k3s_upgrade_final_version
+      changed_when: false
+      failed_when: >-
+        k3s_upgrade_final_version.rc != 0
+        or ('k3s version ' ~ k3s_target_version ~ ' ') not in k3s_upgrade_final_version.stdout
+
+    - name: Verify the local API server can proxy to every kubelet
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - --request-timeout=5s
+          - get
+          - "--raw=/api/v1/nodes/{{ item }}/proxy/healthz"
+      register: k3s_upgrade_kubelet_proxy
+      changed_when: false
+      until:
+        - k3s_upgrade_kubelet_proxy.rc == 0
+        - k3s_upgrade_kubelet_proxy.stdout | trim == 'ok'
+      retries: 30
+      delay: 2
+      loop: "{{ groups.k3s_cluster }}"
+      loop_control:
+        label: "{{ inventory_hostname }} API -> {{ item }} kubelet"
+
+
+- name: Verify exact Ready Kubernetes Node membership after upgrade
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    k3s_binary_path: /usr/local/bin/k3s
+  tasks:
+    - name: Read Kubernetes Node names
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary_path }}"
+          - kubectl
+          - get
+          - nodes
+          - --no-headers
+          - --output=custom-columns=NAME:.metadata.name
+      register: k3s_upgrade_live_nodes
+      changed_when: false
+
+    - name: Validate and store Kubernetes Node names
+      ansible.builtin.include_tasks: ../../tasks/k3s-node-names.yml
+      vars:
+        k3s_node_name_result: "{{ k3s_upgrade_live_nodes }}"
+        k3s_node_name_fact: k3s_upgrade_live_node_names
+
+    - name: Require exact Kubernetes Node membership
+      ansible.builtin.assert:
+        that:
+          - k3s_upgrade_live_node_names | length == 3
+          - k3s_upgrade_live_node_names | unique | length == 3
+          - groups.k3s_cluster | sort == k3s_upgrade_live_node_names | sort
+        fail_msg: The final Kubernetes Node set does not match the complete inventory.
+
+    - name: Require every Kubernetes Node to be Ready
+      ansible.builtin.command:
+        argv: ["{{ k3s_binary_path }}", kubectl, wait, "--for=condition=Ready", "node/{{ item }}", "--timeout=300s"]
+      loop: "{{ groups.k3s_cluster }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
