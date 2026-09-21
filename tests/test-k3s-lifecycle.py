@@ -236,6 +236,25 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(any(task.get("ansible.builtin.command", {}).get("argv", [])[1:3]
                             == ["etcd-snapshot", "ls"] for task in snapshot["tasks"]))
 
+    def test_os_upgrade_version_regex_matches_working_k3s_playbook(self):
+        os_tasks = self.os[1]["tasks"]
+        k3s_tasks = self.upgrade[1]["tasks"]
+        for os_name, k3s_name, field in (
+                ("Require one parseable K3s version",
+                 "Require one parseable installed K3s version", "ansible.builtin.assert"),
+                ("Store K3s version", "Store the installed K3s version", "ansible.builtin.set_fact")):
+            os_task = next(task for task in os_tasks if task["name"] == os_name)
+            k3s_task = next(task for task in k3s_tasks if task["name"] == k3s_name)
+            os_expression = (os_task[field]["that"][0] if field == "ansible.builtin.assert"
+                             else os_task[field]["k3s_os_version"])
+            k3s_expression = (k3s_task[field]["that"][0] if field == "ansible.builtin.assert"
+                              else k3s_task[field]["k3s_current_version"])
+            os_pattern = re.search(r"regex_findall\('([^']+)'\)", os_expression).group(1)
+            k3s_pattern = re.search(r"regex_findall\('([^']+)'\)", k3s_expression).group(1)
+            self.assertEqual(os_pattern, k3s_pattern)
+            self.assertNotIn(r"\\.", os_pattern)
+            self.assertNotIn(r"\\+", os_pattern)
+
     def test_os_upgrade_success_and_failure_boundaries(self):
         rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
         boundary = rolling["tasks"][0]
