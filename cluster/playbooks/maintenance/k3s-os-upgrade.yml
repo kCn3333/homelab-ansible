@@ -399,19 +399,6 @@
             msg: >-
               OS upgrade stopped on {{ inventory_hostname }}. Treat this node as cordoned;
               inspect diagnostics and verify the cordon state before any further upgrade.
-      always:
-        - name: Report current Node progress
-          ansible.builtin.debug:
-            msg: >-
-              {{ inventory_hostname }} packages={{ k3s_os_packages.changed | default('NOT CHECKED') }}
-              reboot_required={{ k3s_os_reboot_marker.stat.exists | default('NOT CHECKED') }}
-              reboot_performed={{ k3s_os_reboot.changed | default(false) }}
-              ssh={{ k3s_os_ssh is succeeded if k3s_os_ssh is defined else 'NOT CHECKED' }}
-              k3s={{ k3s_os_service_after is succeeded if k3s_os_service_after is defined else 'NOT CHECKED' }}
-              api_etcd={{ k3s_os_readyz_after is succeeded if k3s_os_readyz_after is defined else 'NOT CHECKED' }}
-              node_ready={{ k3s_os_node_ready is succeeded if k3s_os_node_ready is defined else 'NOT CHECKED' }}
-              cilium={{ k3s_os_cilium is succeeded if k3s_os_cilium is defined else 'NOT CHECKED' }}
-              uncordoned={{ k3s_os_uncordon.rc | default(1) == 0 if k3s_os_uncordon is defined else false }}
 
 - name: Verify final local K3s state version and 9 of 9 proxy matrix
   hosts: k3s_cluster
