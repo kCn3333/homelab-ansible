@@ -27,6 +27,8 @@ Node names. No concrete private values belong in this repository.
   migration of this playbook is intentionally deferred.
 - `playbooks/audit/k3s-health.yml`: basic read-only host and Node health in
   `report` or `strict` mode; extended audits are separate future playbooks.
+- `playbooks/maintenance/k3s-os-upgrade.yml`: controlled Ubuntu package upgrade;
+  see [the OS upgrade procedure](../docs/k3s-os-upgrade.md).
 - `playbooks/maintenance/k3s-upgrade.yml`: performs a guarded, sequential K3s
   binary-only upgrade with an etcd snapshot and full post-upgrade validation;
   see [the upgrade procedure](../docs/k3s-upgrade.md).
