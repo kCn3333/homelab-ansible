@@ -12,14 +12,20 @@ Set `k3s_os_upgrade_confirm: true` explicitly for each run. Optionally set
 single-instance CloudNativePG databases and RWO volumes. Draining that node
 may briefly interrupt those databases.
 
-The read-only preflight checks Ubuntu 24.04, architecture, K3s service and
-local API/etcd, matching K3s versions, package state, filesystem space, exact
-Ready and schedulable Node membership, a 9/9 API-to-kubelet matrix, and healthy
-Longhorn volumes. Failures stop the run without automatic repair. A single
-named etcd snapshot is taken on `master` before any package change, then each
-node is cordoned, drained through eviction, upgraded with APT, rebooted only if
-required, checked for recovery, and uncordoned. Final checks include Cilium on
-all nodes and require every Pod to be in phase `Running` or `Succeeded`.
+Preflight checks Ubuntu 24.04, architecture, K3s service and local API/etcd,
+matching K3s versions, package state, filesystem space, exact Ready and
+schedulable Node membership, a 9/9 API-to-kubelet matrix, and healthy Longhorn
+volumes. It then refreshes the APT cache on all three nodes, previews a dist
+upgrade in check mode, and reads each reboot marker before any cordon. Failures
+stop the run without automatic repair.
+
+If no node needs packages or a reboot, the playbook skips the etcd snapshot and
+all per-node maintenance. Otherwise it saves one named snapshot on `master`.
+Only nodes needing work are cordoned, drained, upgraded, rebooted when required,
+checked for recovery and uncordoned. A 9/9 API-to-kubelet check follows each
+updated node. The final cluster checks still cover every node, including Cilium,
+Longhorn, and Pod phases limited to `Running` or `Succeeded`. The final table
+marks nodes without work `CURRENT` and their per-node actions `SKIPPED`.
 
 If a node fails after cordon, the playbook stops before the next node and leaves
 it cordoned. Inspect the failed Ansible task, Node description, assigned Pods,

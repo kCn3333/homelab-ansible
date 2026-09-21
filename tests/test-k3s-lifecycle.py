@@ -228,6 +228,8 @@ class LifecycleTests(unittest.TestCase):
                          ("k3s_os_upgrade_sequence", 1, "inventory", True))
         snapshot = next(play for play in self.os if "snapshot" in play["name"])
         self.assertEqual(snapshot["hosts"], "master")
+        self.assertEqual(snapshot["tasks"][0]["ansible.builtin.meta"], "end_play")
+        self.assertIn("k3s_os_maintenance_required", snapshot["tasks"][0]["when"])
         saves = [task for task in snapshot["tasks"] if
                  "ansible.builtin.command" in task and
                  task["ansible.builtin.command"]["argv"][1:3] == ["etcd-snapshot", "save"]]
@@ -263,6 +265,46 @@ class LifecycleTests(unittest.TestCase):
                 text = (ROOT / path).read_text()
                 self.assertNotIn("from_json).items", text)
 
+    def test_os_upgrade_previews_work_before_cordon(self):
+        preparation = next(play for play in self.os if play["name"] ==
+                           "Prepare OS maintenance on every server")
+        self.assertLess(self.os.index(next(play for play in self.os if play["name"] ==
+                                          "Require starting API server to kubelet matrix 9 of 9")),
+                        self.os.index(preparation))
+        self.assertEqual(preparation["hosts"], "k3s_cluster")
+        cache, preview, marker, decision = preparation["tasks"]
+        self.assertTrue(cache["ansible.builtin.apt"]["update_cache"])
+        self.assertEqual(preview["ansible.builtin.apt"]["upgrade"], "dist")
+        self.assertTrue(preview["check_mode"])
+        self.assertEqual(marker["ansible.builtin.stat"]["path"], "/var/run/reboot-required")
+        self.assertIn("k3s_os_apt_preview.changed", decision["ansible.builtin.set_fact"]
+                      ["k3s_os_maintenance_required"])
+        self.assertIn("k3s_os_reboot_marker_before.stat.exists",
+                      decision["ansible.builtin.set_fact"]["k3s_os_maintenance_required"])
+        rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
+        self.assertEqual(rolling["tasks"][0]["when"], "k3s_os_maintenance_required | bool")
+        self.assertNotIn("Refresh APT cache", str(rolling))
+        summary = self.os[-1]["tasks"][0]["ansible.builtin.debug"]["msg"]
+        for value in ("h.k3s_os_maintenance_required", "CURRENT", "SKIPPED"):
+            self.assertIn(value, summary)
+        self.assertLess(summary.index("{% if h.k3s_os_maintenance_required"),
+                        summary.index("h.k3s_os_packages.changed"))
+        self.assertLess(summary.index("h.k3s_os_packages.changed"),
+                        summary.index("{% else %}"))
+
+    def test_os_upgrade_health_reads_nodes_once_and_logs_names(self):
+        health = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-cluster-health.yml").read_text())
+        reads = [task for task in health if task.get("ansible.builtin.command", {}).get("argv", [])[:4]
+                 == ["/usr/local/bin/k3s", "kubectl", "get", "nodes"]]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(reads[0]["ansible.builtin.command"]["argv"][-1], "--output=json")
+        ready = next(task for task in health if task["name"] ==
+                     "Require every Node Ready and schedulable")
+        self.assertEqual(ready["loop"], "{{ k3s_os_node_names }}")
+        self.assertEqual(ready["loop_control"]["label"], "{{ item }}")
+        self.assertIn("selectattr('metadata.name', 'equalto', item)",
+                      ready["vars"]["k3s_os_matching_nodes"])
+
     def test_os_upgrade_success_and_failure_boundaries(self):
         rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
         boundary = rolling["tasks"][0]
@@ -292,7 +334,7 @@ class LifecycleTests(unittest.TestCase):
         proxy_text = (ROOT / "cluster/tasks/k3s-os-proxy-matrix.yml").read_text()
         self.assertIn("--raw=/api/v1/nodes/{{ item.1 }}/proxy/healthz", proxy_text)
         self.assertIn("groups.k3s_cluster | product(groups.k3s_cluster)", proxy_text)
-        self.assertIn("every Pod to be in phase `Running` or `Succeeded`",
+        self.assertIn("Pod phases limited to `Running` or `Succeeded`",
                       (ROOT / "docs/k3s-os-upgrade.md").read_text())
         health = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-cluster-health.yml").read_text())
         pod_phase = next(task for task in health if task["name"] ==

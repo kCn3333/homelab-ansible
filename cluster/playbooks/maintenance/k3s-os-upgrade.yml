@@ -46,7 +46,7 @@
       run_once: true
       changed_when: false
 
-- name: Read-only OS and K3s preflight on every server
+- name: Run read-only OS and K3s preflight on every server
   hosts: k3s_cluster
   gather_facts: true
   become: true
@@ -161,12 +161,45 @@
     - name: Check each API server to kubelet path
       ansible.builtin.include_tasks: ../../tasks/k3s-os-proxy-matrix.yml
 
+- name: Prepare OS maintenance on every server
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Refresh APT cache before any cordon
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+
+    - name: Preview Ubuntu package upgrades
+      ansible.builtin.apt:
+        upgrade: dist
+      check_mode: true
+      register: k3s_os_apt_preview
+
+    - name: Check reboot marker before maintenance
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: k3s_os_reboot_marker_before
+
+    - name: Record whether this Node needs maintenance
+      ansible.builtin.set_fact:
+        k3s_os_maintenance_required: >-
+          {{ k3s_os_apt_preview.changed or k3s_os_reboot_marker_before.stat.exists }}
+
 - name: Save one pre OS upgrade embedded etcd snapshot
   hosts: master
   gather_facts: false
   become: true
   any_errors_fatal: true
   tasks:
+    - name: Skip snapshot when every Node is current
+      ansible.builtin.meta: end_play
+      when: >-
+        groups.k3s_cluster | map('extract', hostvars, 'k3s_os_maintenance_required')
+        | map('bool') | select('equalto', true) | list | length == 0
+
     - name: Read UTC snapshot timestamp
       ansible.builtin.command:
         argv: [date, -u, +%Y%m%dT%H%M%SZ]
@@ -201,6 +234,7 @@
     k3s_os_kubectl_delegate: "{{ 'worker1' if inventory_hostname == 'master' else groups.masters[0] }}"
   tasks:
     - name: Upgrade the current node with a fail closed recovery boundary
+      when: k3s_os_maintenance_required | bool
       block:
         - name: Recheck cluster before cordon
           ansible.builtin.include_tasks: ../../tasks/k3s-os-cluster-health.yml
@@ -227,11 +261,6 @@
           register: k3s_os_drain
           changed_when: k3s_os_drain.rc == 0
           failed_when: k3s_os_drain.rc != 0
-
-        - name: Refresh APT cache
-          ansible.builtin.apt:
-            update_cache: true
-            cache_valid_time: 0
 
         - name: Upgrade Ubuntu packages
           ansible.builtin.apt:
@@ -479,6 +508,7 @@
           Node     OS packages  Reboot required  Reboot performed  SSH  K3s  Local API/etcd  Node Ready  Cilium  Uncordoned
           {% for node in groups.k3s_cluster %}
           {% set h = hostvars[node] %}
+          {% if h.k3s_os_maintenance_required | bool %}
           {{ '%-8s %-12s %-16s %-17s %-4s %-4s %-15s %-11s %-7s %s' | format(
              node,
              'CHANGED' if h.k3s_os_packages.changed else 'OK',
@@ -490,4 +520,9 @@
              'OK' if h.k3s_os_node_ready is succeeded else 'FAILED',
              'OK' if h.k3s_os_cilium is succeeded else 'FAILED',
              'YES' if h.k3s_os_uncordon.rc == 0 else 'NO') }}
+          {% else %}
+          {{ '%-8s %-12s %-16s %-17s %-4s %-4s %-15s %-11s %-7s %s' | format(
+             node, 'CURRENT', 'NO', 'SKIPPED', 'SKIPPED', 'SKIPPED',
+             'SKIPPED', 'SKIPPED', 'SKIPPED', 'SKIPPED') }}
+          {% endif %}
           {% endfor %}

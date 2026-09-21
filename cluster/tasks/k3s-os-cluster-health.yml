@@ -1,25 +1,5 @@
 ---
-- name: Read Kubernetes Node names
-  ansible.builtin.command:
-    argv: [/usr/local/bin/k3s, kubectl, get, nodes, --no-headers, '--output=custom-columns=NAME:.metadata.name']
-  delegate_to: "{{ k3s_os_kubectl_delegate | default(groups.masters[0]) }}"
-  register: k3s_os_nodes
-  changed_when: false
-  failed_when: k3s_os_nodes.rc != 0
-
-- name: Validate and store Kubernetes Node names
-  ansible.builtin.include_tasks: k3s-node-names.yml
-  vars:
-    k3s_node_name_result: "{{ k3s_os_nodes }}"
-    k3s_node_name_fact: k3s_os_node_names
-
-- name: Require exact Kubernetes Node membership
-  ansible.builtin.assert:
-    that:
-      - k3s_os_node_names | length == 3
-      - k3s_os_node_names | sort == groups.k3s_cluster | sort
-
-- name: Read Kubernetes Node status
+- name: Read Kubernetes Nodes once
   ansible.builtin.command:
     argv: [/usr/local/bin/k3s, kubectl, get, nodes, --output=json]
   delegate_to: "{{ k3s_os_kubectl_delegate | default(groups.masters[0]) }}"
@@ -27,25 +7,35 @@
   changed_when: false
   failed_when: k3s_os_node_json.rc != 0
 
-- name: Require exact Node status set
+- name: Store Kubernetes Node names
+  ansible.builtin.set_fact:
+    k3s_os_node_names: >-
+      {{ (k3s_os_node_json.stdout | from_json)['items']
+         | map(attribute='metadata.name') | list }}
+
+- name: Require exact Kubernetes Node membership
   ansible.builtin.assert:
     that:
-      - (k3s_os_node_json.stdout | from_json)['items'] | length == 3
-      - >-
-        (k3s_os_node_json.stdout | from_json)['items']
-        | map(attribute='metadata.name') | list | sort == groups.k3s_cluster | sort
+      - k3s_os_node_names | length == 3
+      - k3s_os_node_names | unique | length == 3
+      - k3s_os_node_names | sort == groups.k3s_cluster | sort
 
 - name: Require every Node Ready and schedulable
   ansible.builtin.assert:
     that:
+      - k3s_os_matching_nodes | length == 1
       - >-
-        item.status.conditions
+        k3s_os_matching_nodes[0].status.conditions
         | selectattr('type', 'equalto', 'Ready')
         | selectattr('status', 'equalto', 'True') | list | length == 1
-      - not (item.spec.unschedulable | default(false) | bool)
-  loop: "{{ (k3s_os_node_json.stdout | from_json)['items'] }}"
+      - not (k3s_os_matching_nodes[0].spec.unschedulable | default(false) | bool)
+  vars:
+    k3s_os_matching_nodes: >-
+      {{ (k3s_os_node_json.stdout | from_json)['items']
+         | selectattr('metadata.name', 'equalto', item) | list }}
+  loop: "{{ k3s_os_node_names }}"
   loop_control:
-    label: "{{ item.metadata.name }}"
+    label: "{{ item }}"
 
 - name: Read Longhorn volumes
   ansible.builtin.command:
