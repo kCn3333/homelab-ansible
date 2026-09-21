@@ -502,27 +502,31 @@
   gather_facts: false
   become: false
   tasks:
-    - name: Show per Node result table
-      ansible.builtin.debug:
-        msg: |
-          Node     OS packages  Reboot required  Reboot performed  SSH  K3s  Local API/etcd  Node Ready  Cilium  Uncordoned
+    - name: Build per Node result table
+      ansible.builtin.set_fact:
+        k3s_os_result_table: |
+          Node     Check              Result
           {% for node in groups.k3s_cluster %}
           {% set h = hostvars[node] %}
           {% if h.k3s_os_maintenance_required | bool %}
-          {{ '%-8s %-12s %-16s %-17s %-4s %-4s %-15s %-11s %-7s %s' | format(
-             node,
-             'CHANGED' if h.k3s_os_packages.changed else 'OK',
-             'YES' if h.k3s_os_reboot_marker.stat.exists else 'NO',
-             'YES' if h.k3s_os_reboot is defined and h.k3s_os_reboot.changed else 'NO',
-             'OK' if h.k3s_os_ssh is succeeded else 'FAILED',
-             'OK' if h.k3s_os_service_after is succeeded else 'FAILED',
-             'OK' if h.k3s_os_readyz_after is succeeded else 'FAILED',
-             'OK' if h.k3s_os_node_ready is succeeded else 'FAILED',
-             'OK' if h.k3s_os_cilium is succeeded else 'FAILED',
-             'YES' if h.k3s_os_uncordon.rc == 0 else 'NO') }}
+          {{ '%-8s %-18s %s' | format(node, 'OS packages', 'CHANGED' if h.k3s_os_packages.changed else 'OK') }}
+          {{ '%-8s %-18s %s' | format('', 'Reboot required', 'YES' if h.k3s_os_reboot_marker.stat.exists else 'NO') }}
+          {{ '%-8s %-18s %s' | format('', 'Reboot performed', 'YES' if h.k3s_os_reboot is defined and h.k3s_os_reboot.changed else 'NO') }}
+          {{ '%-8s %-18s %s' | format('', 'SSH', 'OK' if h.k3s_os_ssh is succeeded else 'FAILED') }}
+          {{ '%-8s %-18s %s' | format('', 'K3s', 'OK' if h.k3s_os_service_after is succeeded else 'FAILED') }}
+          {{ '%-8s %-18s %s' | format('', 'Local API/etcd', 'OK' if h.k3s_os_readyz_after is succeeded else 'FAILED') }}
+          {{ '%-8s %-18s %s' | format('', 'Node Ready', 'OK' if h.k3s_os_node_ready is succeeded else 'FAILED') }}
+          {{ '%-8s %-18s %s' | format('', 'Cilium', 'OK' if h.k3s_os_cilium is succeeded else 'FAILED') }}
+          {{ '%-8s %-18s %s' | format('', 'Uncordoned', 'YES' if h.k3s_os_uncordon.rc == 0 else 'NO') }}
           {% else %}
-          {{ '%-8s %-12s %-16s %-17s %-4s %-4s %-15s %-11s %-7s %s' | format(
-             node, 'CURRENT', 'NO', 'SKIPPED', 'SKIPPED', 'SKIPPED',
-             'SKIPPED', 'SKIPPED', 'SKIPPED', 'SKIPPED') }}
+          {{ '%-8s %-18s %s' | format(node, 'OS packages', 'CURRENT') }}
+          {{ '%-8s %-18s %s' | format('', 'Reboot required', 'NO') }}
+          {% for check in ['Reboot performed', 'SSH', 'K3s', 'Local API/etcd', 'Node Ready', 'Cilium', 'Uncordoned'] %}
+          {{ '%-8s %-18s %s' | format('', check, 'SKIPPED') }}
+          {% endfor %}
           {% endif %}
           {% endfor %}
+
+    - name: Show per Node result table
+      ansible.builtin.debug:
+        msg: "{{ k3s_os_result_table.splitlines() }}"

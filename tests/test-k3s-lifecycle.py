@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import unittest
 
+from jinja2 import Environment, StrictUndefined
 import yaml
 
 ROOT = Path(__file__).parents[1]
@@ -284,13 +285,37 @@ class LifecycleTests(unittest.TestCase):
         rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
         self.assertEqual(rolling["tasks"][0]["when"], "k3s_os_maintenance_required | bool")
         self.assertNotIn("Refresh APT cache", str(rolling))
-        summary = self.os[-1]["tasks"][0]["ansible.builtin.debug"]["msg"]
+        summary = self.os[-1]["tasks"][0]["ansible.builtin.set_fact"]["k3s_os_result_table"]
         for value in ("h.k3s_os_maintenance_required", "CURRENT", "SKIPPED"):
             self.assertIn(value, summary)
+        self.assertIn("Node     Check              Result", summary)
+        for check in ("OS packages", "Reboot required", "Reboot performed", "SSH",
+                      "K3s", "Local API/etcd", "Node Ready", "Cilium", "Uncordoned"):
+            self.assertIn(check, summary)
         self.assertLess(summary.index("{% if h.k3s_os_maintenance_required"),
                         summary.index("h.k3s_os_packages.changed"))
         self.assertLess(summary.index("h.k3s_os_packages.changed"),
                         summary.index("{% else %}"))
+
+    def test_os_upgrade_result_table_renders_current_nodes_in_narrow_rows(self):
+        summary = self.os[-1]["tasks"][0]["ansible.builtin.set_fact"]["k3s_os_result_table"]
+        self.assertEqual(self.os[-1]["tasks"][1]["ansible.builtin.debug"]["msg"],
+                         "{{ k3s_os_result_table.splitlines() }}")
+        env = Environment(undefined=StrictUndefined, trim_blocks=True)
+        env.filters["bool"] = bool
+        env.tests["succeeded"] = lambda result: result.get("failed") is not True
+        nodes = ["master", "worker1", "worker2"]
+        rendered = env.from_string(summary).render(
+            groups={"k3s_cluster": nodes},
+            hostvars={node: {"k3s_os_maintenance_required": False} for node in nodes})
+        lines = rendered.splitlines()
+        self.assertEqual(lines[0], "Node     Check              Result")
+        self.assertEqual(len(lines), 28)
+        self.assertEqual(lines[1], "master   OS packages        CURRENT")
+        self.assertEqual(lines[2], "         Reboot required    NO")
+        self.assertEqual(lines[3], "         Reboot performed   SKIPPED")
+        self.assertEqual(lines[10], "worker1  OS packages        CURRENT")
+        self.assertTrue(all(len(line) <= 36 for line in lines))
 
     def test_os_upgrade_health_reads_nodes_once_and_logs_names(self):
         health = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-cluster-health.yml").read_text())
