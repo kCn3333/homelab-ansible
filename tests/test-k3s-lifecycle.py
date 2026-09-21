@@ -255,6 +255,14 @@ class LifecycleTests(unittest.TestCase):
             self.assertNotIn(r"\\.", os_pattern)
             self.assertNotIn(r"\\+", os_pattern)
 
+    def test_os_upgrade_json_items_use_key_lookup(self):
+        for path in ("cluster/playbooks/maintenance/k3s-os-upgrade.yml",
+                     "cluster/tasks/k3s-os-cluster-health.yml",
+                     "cluster/tasks/k3s-os-proxy-matrix.yml"):
+            with self.subTest(path=path):
+                text = (ROOT / path).read_text()
+                self.assertNotIn("from_json).items", text)
+
     def test_os_upgrade_success_and_failure_boundaries(self):
         rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
         boundary = rolling["tasks"][0]

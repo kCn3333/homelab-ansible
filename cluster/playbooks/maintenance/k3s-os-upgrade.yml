@@ -300,9 +300,9 @@
           failed_when: k3s_os_cilium.rc != 0
           until: >-
             k3s_os_cilium.rc == 0
-            and (k3s_os_cilium.stdout | from_json).items | length == 1
-            and (k3s_os_cilium.stdout | from_json).items[0].status.phase == 'Running'
-            and (((k3s_os_cilium.stdout | from_json).items[0].status.conditions | default([]))
+            and (k3s_os_cilium.stdout | from_json)['items'] | length == 1
+            and (k3s_os_cilium.stdout | from_json)['items'][0].status.phase == 'Running'
+            and (((k3s_os_cilium.stdout | from_json)['items'][0].status.conditions | default([]))
                  | selectattr('type', 'equalto', 'Ready')
                  | selectattr('status', 'equalto', 'True') | list | length) == 1
           retries: 60
@@ -453,9 +453,9 @@
       failed_when: k3s_os_final_cilium.rc != 0
       until: >-
         k3s_os_final_cilium.rc == 0
-        and (k3s_os_final_cilium.stdout | from_json).items | length == 1
-        and (k3s_os_final_cilium.stdout | from_json).items[0].status.phase == 'Running'
-        and (((k3s_os_final_cilium.stdout | from_json).items[0].status.conditions | default([]))
+        and (k3s_os_final_cilium.stdout | from_json)['items'] | length == 1
+        and (k3s_os_final_cilium.stdout | from_json)['items'][0].status.phase == 'Running'
+        and (((k3s_os_final_cilium.stdout | from_json)['items'][0].status.conditions | default([]))
              | selectattr('type', 'equalto', 'Ready')
              | selectattr('status', 'equalto', 'True') | list | length) == 1
       retries: 60

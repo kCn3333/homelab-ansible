@@ -30,9 +30,9 @@
 - name: Require exact Node status set
   ansible.builtin.assert:
     that:
-      - (k3s_os_node_json.stdout | from_json).items | length == 3
+      - (k3s_os_node_json.stdout | from_json)['items'] | length == 3
       - >-
-        (k3s_os_node_json.stdout | from_json).items
+        (k3s_os_node_json.stdout | from_json)['items']
         | map(attribute='metadata.name') | list | sort == groups.k3s_cluster | sort
 
 - name: Require every Node Ready and schedulable
@@ -43,7 +43,7 @@
         | selectattr('type', 'equalto', 'Ready')
         | selectattr('status', 'equalto', 'True') | list | length == 1
       - not (item.spec.unschedulable | default(false) | bool)
-  loop: "{{ (k3s_os_node_json.stdout | from_json).items }}"
+  loop: "{{ (k3s_os_node_json.stdout | from_json)['items'] }}"
   loop_control:
     label: "{{ item.metadata.name }}"
 
@@ -56,8 +56,8 @@
   failed_when: k3s_os_longhorn_json.rc != 0
   until: >-
     k3s_os_longhorn_json.rc == 0
-    and (k3s_os_longhorn_json.stdout | from_json).items | length > 0
-    and ((k3s_os_longhorn_json.stdout | from_json).items
+    and (k3s_os_longhorn_json.stdout | from_json)['items'] | length > 0
+    and ((k3s_os_longhorn_json.stdout | from_json)['items']
          | rejectattr('status.robustness', 'equalto', 'healthy') | list | length) == 0
   retries: 60
   delay: 5
@@ -65,9 +65,9 @@
 - name: Require healthy Longhorn volumes
   ansible.builtin.assert:
     that:
-      - (k3s_os_longhorn_json.stdout | from_json).items | length > 0
+      - (k3s_os_longhorn_json.stdout | from_json)['items'] | length > 0
       - >-
-        (k3s_os_longhorn_json.stdout | from_json).items
+        (k3s_os_longhorn_json.stdout | from_json)['items']
         | rejectattr('status.robustness', 'equalto', 'healthy') | list | length == 0
 
 - name: Read Pod phases for final validation
@@ -83,6 +83,6 @@
   ansible.builtin.assert:
     that:
       - >-
-        (k3s_os_pods_json.stdout | from_json).items
+        (k3s_os_pods_json.stdout | from_json)['items']
         | rejectattr('status.phase', 'in', ['Running', 'Succeeded']) | list | length == 0
   when: k3s_os_check_pod_phases | default(false) | bool
