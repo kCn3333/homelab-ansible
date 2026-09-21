@@ -1,0 +1,21 @@
+---
+- name: Verify every API server can proxy to every kubelet
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - --request-timeout=5s
+      - get
+      - '--raw=/api/v1/nodes/{{ item.1 }}/proxy/healthz'
+  delegate_to: "{{ item.0 }}"
+  register: k3s_os_proxy
+  changed_when: false
+  failed_when: k3s_os_proxy.rc != 0
+  until:
+    - k3s_os_proxy.rc == 0
+    - k3s_os_proxy.stdout | trim == 'ok'
+  retries: 30
+  delay: 2
+  loop: "{{ groups.k3s_cluster | product(groups.k3s_cluster) | list }}"
+  loop_control:
+    label: "{{ item.0 }} API -> {{ item.1 }} kubelet"

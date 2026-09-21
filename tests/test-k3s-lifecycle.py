@@ -26,6 +26,8 @@ class LifecycleTests(unittest.TestCase):
         cls.off_text, cls.off = load("cluster/playbooks/power/k3s-power-off.yml")
         cls.upgrade_text, cls.upgrade = load(
             "cluster/playbooks/maintenance/k3s-upgrade.yml")
+        cls.os_text, cls.os = load(
+            "cluster/playbooks/maintenance/k3s-os-upgrade.yml")
 
     def test_power_on_scope_and_recovery(self):
         self.assertEqual(self.on[0]["hosts"], "localhost")
@@ -200,6 +202,141 @@ class LifecycleTests(unittest.TestCase):
                       "flux", "kube-proxy", "community.general.ufw"):
             self.assertNotIn(value, lowered)
         self.assertEqual(lowered.count("state: restarted"), 1)
+
+    def test_os_upgrade_scope_order_and_snapshot(self):
+        self.assertEqual(self.os[0]["hosts"], "all")
+        self.assertTrue(self.os[0]["tasks"][0]["run_once"])
+        self.assertEqual(self.os[0]["tasks"][0]["delegate_to"], "localhost")
+        approval = self.os[0]["tasks"][0]["ansible.builtin.assert"]["that"]
+        scope = "\n".join(approval)
+        for value in ("k3s_os_upgrade_confirm", "ansible_limit", "groups.masters",
+                      "groups.workers", "groups.k3s_cluster", "groups.k3s_servers",
+                      "'k3s_servers' in groups", "unique", "sort",
+                      "groups.masters + groups.workers"):
+            self.assertIn(value, scope)
+        self.assertEqual(self.os[1]["hosts"], "k3s_cluster")
+        self.assertEqual(self.os[0]["vars"]["k3s_os_default_order"],
+                         ["worker2", "master", "worker1"])
+        add_hosts = [task for play in self.os for task in play["tasks"]
+                     if "ansible.builtin.add_host" in task]
+        self.assertEqual(len(add_hosts), 1)
+        self.assertEqual(add_hosts[0]["ansible.builtin.add_host"]["groups"],
+                         "k3s_os_upgrade_sequence")
+        rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
+        self.assertEqual((rolling["hosts"], rolling["serial"], rolling["order"],
+                         rolling["any_errors_fatal"]),
+                         ("k3s_os_upgrade_sequence", 1, "inventory", True))
+        snapshot = next(play for play in self.os if "snapshot" in play["name"])
+        self.assertEqual(snapshot["hosts"], "master")
+        saves = [task for task in snapshot["tasks"] if
+                 "ansible.builtin.command" in task and
+                 task["ansible.builtin.command"]["argv"][1:3] == ["etcd-snapshot", "save"]]
+        self.assertEqual(len(saves), 1)
+        self.assertIn("pre-os-upgrade-", str(saves[0]))
+        self.assertTrue(any(task.get("ansible.builtin.command", {}).get("argv", [])[1:3]
+                            == ["etcd-snapshot", "ls"] for task in snapshot["tasks"]))
+
+    def test_os_upgrade_success_and_failure_boundaries(self):
+        rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
+        boundary = rolling["tasks"][0]
+        block = boundary["block"]
+        names = [task["name"] for task in block]
+        self.assertLess(names.index("Cordon the current node"),
+                        names.index("Drain the current node through eviction"))
+        self.assertLess(names.index("Wait for local API and embedded etcd"),
+                        names.index("Uncordon only after service API Node and Cilium recovery"))
+        self.assertIn("--ignore-daemonsets", str(block))
+        self.assertIn("--delete-emptydir-data", str(block))
+        self.assertEqual(next(task for task in block if task["name"] == "Upgrade Ubuntu packages")
+                         ["ansible.builtin.apt"]["upgrade"], "dist")
+        reboot = next(task for task in block if "ansible.builtin.reboot" in task)
+        self.assertEqual(reboot["when"], "k3s_os_reboot_marker.stat.exists")
+        self.assertEqual(next(task for task in block if task["name"] == "Check reboot marker")
+                         ["ansible.builtin.stat"]["path"], "/var/run/reboot-required")
+        self.assertFalse(any("uncordon" in task.get("ansible.builtin.command", {}).get("argv", [])
+                             for task in boundary["rescue"] + boundary["always"]))
+        self.assertTrue(any("ansible.builtin.fail" in task for task in boundary["rescue"]))
+        self.assertEqual(len(boundary["always"]), 1)
+        for forbidden in ("--force", "--disable-eviction", "ignore_errors", "autoremove"):
+            self.assertNotIn(forbidden, self.os_text)
+        self.assertIn("k3s-os-proxy-matrix.yml", self.os_text)
+        proxy_text = (ROOT / "cluster/tasks/k3s-os-proxy-matrix.yml").read_text()
+        self.assertIn("--raw=/api/v1/nodes/{{ item.1 }}/proxy/healthz", proxy_text)
+        self.assertIn("groups.k3s_cluster | product(groups.k3s_cluster)", proxy_text)
+        self.assertIn("every Pod to be in phase `Running` or `Succeeded`",
+                      (ROOT / "docs/k3s-os-upgrade.md").read_text())
+        health = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-cluster-health.yml").read_text())
+        pod_phase = next(task for task in health if task["name"] ==
+                         "Require every Pod phase to be Running or Succeeded")
+        self.assertIn("rejectattr('status.phase', 'in', ['Running', 'Succeeded'])",
+                      pod_phase["ansible.builtin.assert"]["that"][0])
+        for path in ("cluster/playbooks/maintenance/k3s-os-upgrade.yml",
+                     "cluster/tasks/k3s-os-cluster-health.yml",
+                     "cluster/tasks/k3s-os-proxy-matrix.yml"):
+            _, parsed = load(path)
+            def check(value):
+                if isinstance(value, list):
+                    for item in value:
+                        check(item)
+                elif isinstance(value, dict):
+                    if "ansible.builtin.command" in value:
+                        self.assertIn("changed_when", value)
+                        self.assertIn("failed_when", value)
+                    for item in value.values():
+                        check(item)
+            check(parsed)
+
+    def test_os_upgrade_delegate_matrix_longhorn_and_rescue(self):
+        self.assertNotIn("ansible.builtin.uri", self.os_text)
+        rolling = next(play for play in self.os if play["name"] == "Upgrade one OS server at a time")
+        self.assertIn("'worker1' if inventory_hostname == 'master'",
+                      rolling["vars"]["k3s_os_kubectl_delegate"])
+        boundary = rolling["tasks"][0]
+        block = boundary["block"]
+        rescue = boundary["rescue"]
+        for task in block + rescue:
+            command = task.get("ansible.builtin.command", {})
+            if "kubectl" in command.get("argv", []) and task["name"] not in (
+                    "Wait for local API and embedded etcd",
+                    "Probe local API for diagnostic access"):
+                self.assertEqual(task["delegate_to"], "{{ k3s_os_kubectl_delegate }}")
+        for name, timeout in (("Wait for local API and embedded etcd", "--request-timeout=10s"),
+                              ("Probe local API for diagnostic access", "--request-timeout=5s")):
+            task = next(task for task in block + rescue if task["name"] == name)
+            self.assertIn(timeout, task["ansible.builtin.command"]["argv"])
+            self.assertNotIn("delegate_to", task)
+        health = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-cluster-health.yml").read_text())
+        for task in health:
+            command = task.get("ansible.builtin.command", {})
+            if "kubectl" in command.get("argv", []):
+                self.assertIn("k3s_os_kubectl_delegate", task["delegate_to"])
+        longhorn = next(task for task in health if task["name"] == "Read Longhorn volumes")
+        self.assertEqual((longhorn["retries"], longhorn["delay"]), (60, 5))
+        self.assertIn("status.robustness", longhorn["until"])
+        self.assertIn("length > 0", longhorn["until"])
+
+        uncordon = next(i for i, task in enumerate(block) if "uncordon" in
+                        task.get("ansible.builtin.command", {}).get("argv", []))
+        after = block[uncordon + 1:]
+        self.assertEqual([task["ansible.builtin.include_tasks"] for task in after], [
+            "../../tasks/k3s-os-cluster-health.yml",
+            "../../tasks/k3s-os-proxy-matrix.yml"])
+        self.assertEqual(rescue[0]["ansible.builtin.command"]["argv"][2], "cordon")
+        self.assertEqual(rescue[0]["delegate_to"], "{{ k3s_os_kubectl_delegate }}")
+        self.assertTrue(rescue[0]["ignore_unreachable"])
+        self.assertIn("ansible.builtin.fail", rescue[-1])
+        self.assertTrue(all(task["ignore_unreachable"] for task in rescue[1:-1]
+                            if task["name"] in ("Diagnose K3s service status",
+                                                "Diagnose recent K3s journal")))
+
+        proxy = yaml.safe_load((ROOT / "cluster/tasks/k3s-os-proxy-matrix.yml").read_text())[0]
+        self.assertEqual(proxy["delegate_to"], "{{ item.0 }}")
+        self.assertEqual(proxy["loop"],
+                         "{{ groups.k3s_cluster | product(groups.k3s_cluster) | list }}")
+        includes = [play for play in self.os if any(
+            task.get("ansible.builtin.include_tasks") == "../../tasks/k3s-os-proxy-matrix.yml"
+            for task in play.get("tasks", []))]
+        self.assertEqual([play["hosts"] for play in includes], ["masters", "masters"])
 
 
 if __name__ == "__main__":

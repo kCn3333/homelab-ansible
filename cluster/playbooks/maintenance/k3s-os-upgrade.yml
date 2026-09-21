@@ -1,0 +1,506 @@
+---
+- name: Approve the complete OS upgrade scope
+  hosts: all
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  vars:
+    k3s_os_default_order: [worker2, master, worker1]
+  tasks:
+    - name: Require explicit approval complete inventory and exact order
+      ansible.builtin.assert:
+        that:
+          - k3s_os_upgrade_confirm is defined
+          - k3s_os_upgrade_confirm | default(false) | bool
+          - ansible_limit is not defined or ansible_limit | trim | length == 0
+          - "'masters' in groups"
+          - "'workers' in groups"
+          - "'k3s_cluster' in groups"
+          - "'k3s_servers' in groups"
+          - groups.masters | default([]) == ['master']
+          - groups.workers | default([]) | length == 2
+          - groups.workers | default([]) | sort == ['worker1', 'worker2']
+          - groups.k3s_cluster | default([]) | length == 3
+          - groups.k3s_cluster | default([]) | unique | length == 3
+          - groups.k3s_cluster | default([]) | sort == ['master', 'worker1', 'worker2']
+          - groups.masters | default([]) | intersect(groups.workers | default([])) | length == 0
+          - groups.k3s_cluster | sort == (groups.masters + groups.workers) | sort
+          - groups.k3s_servers | default([]) | length == 3
+          - groups.k3s_servers | default([]) | unique | length == 3
+          - groups.k3s_servers | default([]) | sort == groups.k3s_cluster | sort
+          - (k3s_os_upgrade_order | default(k3s_os_default_order)) | type_debug == 'list'
+          - (k3s_os_upgrade_order | default(k3s_os_default_order)) | length == 3
+          - (k3s_os_upgrade_order | default(k3s_os_default_order)) | unique | length == 3
+          - (k3s_os_upgrade_order | default(k3s_os_default_order)) | sort == groups.k3s_cluster | sort
+        fail_msg: >-
+          OS upgrade requires k3s_os_upgrade_confirm=true, exactly master/worker1/worker2
+          in masters/workers/k3s_cluster/k3s_servers, a complete order, and no --limit.
+      run_once: true
+      delegate_to: localhost
+
+    - name: Build the approved serial order
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: k3s_os_upgrade_sequence
+      loop: "{{ k3s_os_upgrade_order | default(k3s_os_default_order) }}"
+      run_once: true
+      changed_when: false
+
+- name: Read-only OS and K3s preflight on every server
+  hosts: k3s_cluster
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require Ubuntu 24.04 on x86_64
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_version == '24.04'
+          - ansible_facts.architecture == 'x86_64'
+
+    - name: Check the K3s binary
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_os_binary
+
+    - name: Require executable K3s binary
+      ansible.builtin.assert:
+        that:
+          - k3s_os_binary.stat.isreg | default(false)
+          - k3s_os_binary.stat.executable | default(false)
+
+    - name: Read installed K3s version
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, --version]
+      register: k3s_os_version_output
+      changed_when: false
+      failed_when: k3s_os_version_output.rc != 0
+
+    - name: Require one parseable K3s version
+      ansible.builtin.assert:
+        that:
+          - >-
+            k3s_os_version_output.stdout
+            | regex_findall('(?m)^k3s version (v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+)(?: |$)')
+            | length == 1
+
+    - name: Store K3s version
+      ansible.builtin.set_fact:
+        k3s_os_version: >-
+          {{ (k3s_os_version_output.stdout
+              | regex_findall('(?m)^k3s version (v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+)(?: |$)')) | first }}
+
+    - name: Require active K3s service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, k3s.service]
+      register: k3s_os_service
+      changed_when: false
+      failed_when: k3s_os_service.rc != 0 or k3s_os_service.stdout | trim != 'active'
+
+    - name: Require local API and embedded etcd readiness
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, --request-timeout=10s, get, '--raw=/readyz?verbose']
+      register: k3s_os_readyz
+      changed_when: false
+      failed_when: >-
+        k3s_os_readyz.rc != 0 or 'readyz check passed' not in k3s_os_readyz.stdout
+        or '[+]etcd ok' not in k3s_os_readyz.stdout
+
+    - name: Audit dpkg state
+      ansible.builtin.command:
+        argv: [dpkg, --audit]
+      register: k3s_os_dpkg
+      changed_when: false
+      failed_when: k3s_os_dpkg.rc != 0 or k3s_os_dpkg.stdout | trim | length > 0
+
+    - name: Check APT dependency state
+      ansible.builtin.command:
+        argv: [apt-get, check]
+      register: k3s_os_apt_check
+      changed_when: false
+      failed_when: k3s_os_apt_check.rc != 0
+
+    - name: Check free filesystem space in KiB
+      ansible.builtin.command:
+        argv: [df, -Pk, "{{ item.path }}"]
+      loop:
+        - {path: /, minimum_kib: 1048576}
+        - {path: /boot, minimum_kib: 262144}
+        - {path: /var, minimum_kib: 1048576}
+      loop_control:
+        label: "{{ item.path }}"
+      register: k3s_os_space
+      changed_when: false
+      failed_when: >-
+        k3s_os_space.rc != 0 or k3s_os_space.stdout_lines | length != 2
+        or (k3s_os_space.stdout_lines[1].split()[3] | default('0') | int) < item.minimum_kib
+
+- name: Require healthy starting cluster and matching K3s versions
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require one installed K3s version
+      ansible.builtin.assert:
+        that:
+          - >-
+            groups.k3s_cluster | map('extract', hostvars, 'k3s_os_version')
+            | unique | list | length == 1
+
+    - name: Check starting cluster health
+      ansible.builtin.include_tasks: ../../tasks/k3s-os-cluster-health.yml
+
+- name: Require starting API server to kubelet matrix 9 of 9
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Check each API server to kubelet path
+      ansible.builtin.include_tasks: ../../tasks/k3s-os-proxy-matrix.yml
+
+- name: Save one pre OS upgrade embedded etcd snapshot
+  hosts: master
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Read UTC snapshot timestamp
+      ansible.builtin.command:
+        argv: [date, -u, +%Y%m%dT%H%M%SZ]
+      register: k3s_os_snapshot_time
+      changed_when: false
+      failed_when: k3s_os_snapshot_time.rc != 0
+
+    - name: Save the single pre OS upgrade snapshot
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, etcd-snapshot, save, --name, "pre-os-upgrade-{{ k3s_os_snapshot_time.stdout }}"]
+      register: k3s_os_snapshot_save
+      changed_when: true
+      failed_when: k3s_os_snapshot_save.rc != 0
+
+    - name: List etcd snapshots
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, etcd-snapshot, ls]
+      register: k3s_os_snapshots
+      changed_when: false
+      failed_when: >-
+        k3s_os_snapshots.rc != 0
+        or ('pre-os-upgrade-' ~ k3s_os_snapshot_time.stdout) not in k3s_os_snapshots.stdout
+
+- name: Upgrade one OS server at a time
+  hosts: k3s_os_upgrade_sequence
+  gather_facts: false
+  become: true
+  serial: 1
+  order: inventory
+  any_errors_fatal: true
+  vars:
+    k3s_os_kubectl_delegate: "{{ 'worker1' if inventory_hostname == 'master' else groups.masters[0] }}"
+  tasks:
+    - name: Upgrade the current node with a fail closed recovery boundary
+      block:
+        - name: Recheck cluster before cordon
+          ansible.builtin.include_tasks: ../../tasks/k3s-os-cluster-health.yml
+
+        - name: Cordon the current node
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, cordon, "{{ inventory_hostname }}"]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_cordon
+          changed_when: k3s_os_cordon.rc == 0
+          failed_when: k3s_os_cordon.rc != 0
+
+        - name: Drain the current node through eviction
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - drain
+              - "{{ inventory_hostname }}"
+              - --ignore-daemonsets
+              - --delete-emptydir-data
+              - --timeout=600s
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_drain
+          changed_when: k3s_os_drain.rc == 0
+          failed_when: k3s_os_drain.rc != 0
+
+        - name: Refresh APT cache
+          ansible.builtin.apt:
+            update_cache: true
+            cache_valid_time: 0
+
+        - name: Upgrade Ubuntu packages
+          ansible.builtin.apt:
+            upgrade: dist
+          register: k3s_os_packages
+
+        - name: Check reboot marker
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: k3s_os_reboot_marker
+
+        - name: Reboot only when required
+          ansible.builtin.reboot:
+            reboot_timeout: 900
+            connect_timeout: 10
+          register: k3s_os_reboot
+          when: k3s_os_reboot_marker.stat.exists
+
+        - name: Wait for SSH
+          ansible.builtin.wait_for_connection:
+            timeout: 300
+          register: k3s_os_ssh
+
+        - name: Wait for active K3s service
+          ansible.builtin.command:
+            argv: [systemctl, is-active, k3s.service]
+          register: k3s_os_service_after
+          changed_when: false
+          failed_when: k3s_os_service_after.rc != 0
+          until: k3s_os_service_after.rc == 0 and k3s_os_service_after.stdout | trim == 'active'
+          retries: 60
+          delay: 5
+
+        - name: Wait for local API and embedded etcd
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - --request-timeout=10s
+              - get
+              - --raw=/readyz?verbose
+          register: k3s_os_readyz_after
+          changed_when: false
+          failed_when: k3s_os_readyz_after.rc != 0
+          until: >-
+            k3s_os_readyz_after.rc == 0
+            and 'readyz check passed' in k3s_os_readyz_after.stdout
+            and '[+]etcd ok' in k3s_os_readyz_after.stdout
+          retries: 60
+          delay: 5
+
+        - name: Wait for current Kubernetes Node Ready
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, wait, '--for=condition=Ready', 'node/{{ inventory_hostname }}', --timeout=300s]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_node_ready
+          changed_when: false
+          failed_when: k3s_os_node_ready.rc != 0
+
+        - name: Read Cilium Pods on current node
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, get, pods, -n, kube-system, -l, k8s-app=cilium, '--field-selector=spec.nodeName={{ inventory_hostname }}', --output=json]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_cilium
+          changed_when: false
+          failed_when: k3s_os_cilium.rc != 0
+          until: >-
+            k3s_os_cilium.rc == 0
+            and (k3s_os_cilium.stdout | from_json).items | length == 1
+            and (k3s_os_cilium.stdout | from_json).items[0].status.phase == 'Running'
+            and (((k3s_os_cilium.stdout | from_json).items[0].status.conditions | default([]))
+                 | selectattr('type', 'equalto', 'Ready')
+                 | selectattr('status', 'equalto', 'True') | list | length) == 1
+          retries: 60
+          delay: 5
+
+        - name: Uncordon only after service API Node and Cilium recovery
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, uncordon, "{{ inventory_hostname }}"]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_uncordon
+          changed_when: k3s_os_uncordon.rc == 0
+          failed_when: k3s_os_uncordon.rc != 0
+
+        - name: Recheck cluster before the next node
+          ansible.builtin.include_tasks: ../../tasks/k3s-os-cluster-health.yml
+
+        - name: Verify all nine API server to kubelet paths before the next node
+          ansible.builtin.include_tasks: ../../tasks/k3s-os-proxy-matrix.yml
+
+      rescue:
+        - name: Restore cordon after a failed node operation
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, cordon, "{{ inventory_hostname }}"]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_recordon
+          changed_when: k3s_os_recordon.rc == 0
+          failed_when: false
+          ignore_unreachable: true
+          when: k3s_os_cordon is defined
+
+        - name: Diagnose Kubernetes Node
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, describe, node, "{{ inventory_hostname }}"]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_diagnostic_node
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Diagnose Pods on current Node
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, get, pods, --all-namespaces, -o, wide, '--field-selector=spec.nodeName={{ inventory_hostname }}']
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Diagnose recent cluster events
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, get, events, --all-namespaces, '--sort-by=.metadata.creationTimestamp']
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Diagnose Kubernetes Node list
+          ansible.builtin.command:
+            argv: [/usr/local/bin/k3s, kubectl, get, nodes, -o, wide]
+          delegate_to: "{{ k3s_os_kubectl_delegate }}"
+          register: k3s_os_diagnostic_nodes
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Diagnose K3s service status
+          ansible.builtin.command:
+            argv: [systemctl, status, k3s.service, --no-pager]
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Diagnose recent K3s journal
+          ansible.builtin.command:
+            argv: [journalctl, -u, k3s.service, -n, '100', --no-pager]
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Probe local API for diagnostic access
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - --request-timeout=5s
+              - get
+              - --raw=/readyz?verbose
+          register: k3s_os_diagnostic_api
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+
+        - name: Stop before the next Node for manual diagnosis
+          ansible.builtin.fail:
+            msg: >-
+              OS upgrade stopped on {{ inventory_hostname }}. Treat this node as cordoned;
+              inspect diagnostics and verify the cordon state before any further upgrade.
+      always:
+        - name: Report current Node progress
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} packages={{ k3s_os_packages.changed | default('NOT CHECKED') }}
+              reboot_required={{ k3s_os_reboot_marker.stat.exists | default('NOT CHECKED') }}
+              reboot_performed={{ k3s_os_reboot.changed | default(false) }}
+              ssh={{ k3s_os_ssh is succeeded if k3s_os_ssh is defined else 'NOT CHECKED' }}
+              k3s={{ k3s_os_service_after is succeeded if k3s_os_service_after is defined else 'NOT CHECKED' }}
+              api_etcd={{ k3s_os_readyz_after is succeeded if k3s_os_readyz_after is defined else 'NOT CHECKED' }}
+              node_ready={{ k3s_os_node_ready is succeeded if k3s_os_node_ready is defined else 'NOT CHECKED' }}
+              cilium={{ k3s_os_cilium is succeeded if k3s_os_cilium is defined else 'NOT CHECKED' }}
+              uncordoned={{ k3s_os_uncordon.rc | default(1) == 0 if k3s_os_uncordon is defined else false }}
+
+- name: Verify final local K3s state version and 9 of 9 proxy matrix
+  hosts: k3s_cluster
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Verify K3s service is active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, k3s.service]
+      register: k3s_os_final_service
+      changed_when: false
+      failed_when: k3s_os_final_service.rc != 0 or k3s_os_final_service.stdout | trim != 'active'
+
+    - name: Verify local API and embedded etcd
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, --request-timeout=10s, get, '--raw=/readyz?verbose']
+      register: k3s_os_final_readyz
+      changed_when: false
+      failed_when: >-
+        k3s_os_final_readyz.rc != 0
+        or 'readyz check passed' not in k3s_os_final_readyz.stdout
+        or '[+]etcd ok' not in k3s_os_final_readyz.stdout
+
+    - name: Read final K3s version
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, --version]
+      register: k3s_os_final_version
+      changed_when: false
+      failed_when: >-
+        k3s_os_final_version.rc != 0
+        or ('k3s version ' ~ k3s_os_version ~ ' ') not in k3s_os_final_version.stdout
+
+    - name: Verify the local Cilium Pod is Ready
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, get, pods, -n, kube-system, -l, k8s-app=cilium, '--field-selector=spec.nodeName={{ inventory_hostname }}', --output=json]
+      register: k3s_os_final_cilium
+      changed_when: false
+      failed_when: k3s_os_final_cilium.rc != 0
+      until: >-
+        k3s_os_final_cilium.rc == 0
+        and (k3s_os_final_cilium.stdout | from_json).items | length == 1
+        and (k3s_os_final_cilium.stdout | from_json).items[0].status.phase == 'Running'
+        and (((k3s_os_final_cilium.stdout | from_json).items[0].status.conditions | default([]))
+             | selectattr('type', 'equalto', 'Ready')
+             | selectattr('status', 'equalto', 'True') | list | length) == 1
+      retries: 60
+      delay: 5
+
+- name: Verify final cluster scheduling storage and Pod phases
+  hosts: masters
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require final cluster health
+      ansible.builtin.include_tasks: ../../tasks/k3s-os-cluster-health.yml
+      vars:
+        k3s_os_check_pod_phases: true
+
+    - name: Verify final API server to kubelet matrix 9 of 9
+      ansible.builtin.include_tasks: ../../tasks/k3s-os-proxy-matrix.yml
+
+    - name: Require one unchanged K3s version on every server
+      ansible.builtin.assert:
+        that:
+          - groups.k3s_cluster | map('extract', hostvars, 'k3s_os_version') | unique | list | length == 1
+
+- name: Report the completed OS upgrade
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Show per Node result table
+      ansible.builtin.debug:
+        msg: |
+          Node     OS packages  Reboot required  Reboot performed  SSH  K3s  Local API/etcd  Node Ready  Cilium  Uncordoned
+          {% for node in groups.k3s_cluster %}
+          {% set h = hostvars[node] %}
+          {{ '%-8s %-12s %-16s %-17s %-4s %-4s %-15s %-11s %-7s %s' | format(
+             node,
+             'CHANGED' if h.k3s_os_packages.changed else 'OK',
+             'YES' if h.k3s_os_reboot_marker.stat.exists else 'NO',
+             'YES' if h.k3s_os_reboot is defined and h.k3s_os_reboot.changed else 'NO',
+             'OK' if h.k3s_os_ssh is succeeded else 'FAILED',
+             'OK' if h.k3s_os_service_after is succeeded else 'FAILED',
+             'OK' if h.k3s_os_readyz_after is succeeded else 'FAILED',
+             'OK' if h.k3s_os_node_ready is succeeded else 'FAILED',
+             'OK' if h.k3s_os_cilium is succeeded else 'FAILED',
+             'YES' if h.k3s_os_uncordon.rc == 0 else 'NO') }}
+          {% endfor %}
