@@ -31,7 +31,6 @@ ansible-galaxy collection install -r collections/requirements.yml
 bash -n scripts/*.sh tests/*.sh
 python3 tests/test-cluster-scripts.py
 python3 tests/test-k3s-lifecycle.py
-python3 tests/test-k3s-ufw.py
 scripts/scan-public-tree.py scripts tests cluster docs .github README.md homelab/README.md
 git diff --check
 ```

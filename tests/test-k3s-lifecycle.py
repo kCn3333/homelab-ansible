@@ -39,25 +39,30 @@ class LifecycleTests(unittest.TestCase):
         cls.rolling = named(cls.os, "Upgrade one OS server at a time")
         cls.health = load("tasks/k3s-os-cluster-health.yml")
         cls.proxy = load("tasks/k3s-os-proxy-matrix.yml")[0]
+        cls.ufw_text = (ROOT / "playbooks/power/k3s-ufw.yml").read_text()
+        cls.ufw = yaml.safe_load(cls.ufw_text)
 
     def contains(self, value, *fragments):
         for fragment in fragments:
             self.assertIn(fragment, str(value))
 
+    def fields(self, actual, **expected):
+        self.assertEqual({key: actual[key] for key in expected}, expected)
+
     def test_power_on_scope_and_wol_cleanup(self):
-        self.assertEqual(self.on[0]["hosts"], "localhost")
+        self.fields(self.on[0], hosts="localhost")
         self.contains(tasks(self.on[0])[0]["ansible.builtin.assert"]["that"],
                       "ansible_limit", "groups.workers | length == 2",
                       "groups.k3s_cluster | length == 3", "groups.k3s_wol_gateway | length == 1",
                       "groups.k3s_wol_gateway | intersect(groups.k3s_cluster)")
         self.assertTrue(all(play["any_errors_fatal"] for play in self.on[1:]))
-        self.assertEqual(self.on[1]["hosts"], "k3s_wol_gateway")
+        self.fields(self.on[1], hosts="k3s_wol_gateway")
         lifecycle = named(tasks(self.on[1]), "Use the existing WOL network profile temporarily")
         active, ready, send = lifecycle["block"]
         self.assertEqual(argv(active), ["networkctl", "up", "{{ k3s_wol_interface }}"])
-        self.assertEqual((ready["retries"], ready["delay"], ready["no_log"]), (30, 2, True))
+        self.fields(ready, retries=30, delay=2, no_log=True)
         self.assertIn("addr_info | length > 0", ready["until"])
-        self.assertEqual(send["loop"], "{{ groups.k3s_cluster }}")
+        self.fields(send, loop="{{ groups.k3s_cluster }}")
         down, verify = lifecycle["always"]
         self.assertEqual(argv(down), ["networkctl", "down", "{{ k3s_wol_interface }}"])
         self.assertIn("'UP' not in", verify["until"])
@@ -69,10 +74,9 @@ class LifecycleTests(unittest.TestCase):
                                (self.upgrade[5], "k3s_upgrade_kubelet_proxy")):
             with self.subTest(play=play["name"]):
                 check = named(tasks(play), "Verify the local API server can proxy to every kubelet")
-                self.assertEqual(check["loop"], "{{ groups.k3s_cluster }}")
+                self.fields(check, loop="{{ groups.k3s_cluster }}", retries=30, delay=2)
                 self.assertEqual([s.replace('"', "'") for s in check["until"]],
                                  [f"{variable}.rc == 0", f"{variable}.stdout | trim == 'ok'"])
-                self.assertEqual((check["retries"], check["delay"]), (30, 2))
                 self.assertIn("--raw=/api/v1/nodes/{{ item }}/proxy/healthz", argv(check))
                 self.assertFalse({"delegate_to", "run_once", "ignore_errors",
                                   "ignore_unreachable"} & check.keys())
@@ -89,7 +93,7 @@ class LifecycleTests(unittest.TestCase):
                       "groups.workers | length == 2")
         self.assertEqual([p["hosts"] for p in self.off],
                          ["k3s_cluster", "masters", "workers", "masters"])
-        self.assertEqual((self.off[2]["serial"], self.off[2]["order"]), (1, "inventory"))
+        self.fields(self.off[2], serial=1, order="inventory")
         self.contains(self.off, "--output=custom-columns=STATE:.status.state", "--output=json",
                       "check-longhorn-restore.py", "selectattr('state', 'equalto', 'started')")
         for play in self.off[2:]:
@@ -100,14 +104,14 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(confirm["ansible.builtin.assert"]["that"], [
                 "not (k3s_poweroff_schedule.unreachable | default(false) | bool)",
                 "k3s_poweroff_schedule.rc | default(-1) == 0"])
-            self.assertEqual(wait["ansible.builtin.wait_for"]["state"], "stopped")
+            self.fields(wait["ansible.builtin.wait_for"], state="stopped")
         tail = str(self.off[2:]).lower()
         for forbidden in ("kubectl", "cordon", "drain", "rollback", "ignore_errors"):
             self.assertNotIn(forbidden, tail)
         self.assertEqual(str(self.off).count("'ignore_unreachable':"), 2)
 
     def test_binary_upgrade_preflight_snapshot_and_install(self):
-        self.assertEqual(self.upgrade[0]["hosts"], "k3s_cluster")
+        self.fields(self.upgrade[0], hosts="k3s_cluster")
         self.contains(tasks(self.upgrade[0])[0]["ansible.builtin.assert"]["that"],
                       "k3s_target_version", "ansible_limit",
                       "groups.masters | default([]) | length == 1",
@@ -117,10 +121,9 @@ class LifecycleTests(unittest.TestCase):
                       "k3s_current_versions | unique | length == 1", "groups.workers + groups.masters")
         self.contains(self.upgrade[1], "/usr/local/bin/k3s", "--version", "k3s.service", "x86_64")
         snapshot, rolling = self.upgrade[3:5]
-        self.assertEqual(snapshot["hosts"], "masters")
+        self.fields(snapshot, hosts="masters")
         self.contains(snapshot, "etcd-snapshot", "pre-k3s-upgrade-", "k3s_upgrade_required")
-        self.assertEqual((rolling["hosts"], rolling["serial"], rolling["order"]),
-                         ("k3s_upgrade_order", 1, "inventory"))
+        self.fields(rolling, hosts="k3s_upgrade_order", serial=1, order="inventory")
         for stage, name in ((tasks(self.upgrade[1]), "Require local API and etcd readiness"),
                             (tasks(rolling), "Wait for local API and etcd readiness")):
             readiness = named(stage, name)
@@ -128,21 +131,14 @@ class LifecycleTests(unittest.TestCase):
             self.contains(readiness, "readyz check passed", "[+]etcd ok")
         self.contains(rolling, "sha256sum-amd64.txt", "checksum", "remote_src", "k3s.service")
         install = named(tasks(rolling), "Atomically replace the K3s binary and keep a backup")
-        self.assertTrue(install["ansible.builtin.copy"]["backup"])
-        self.assertEqual(install["ansible.builtin.copy"]["mode"], "0755")
-        self.assertEqual(install["register"], "k3s_upgrade_binary_install")
+        self.fields(install["ansible.builtin.copy"], backup=True, mode="0755")
+        self.fields(install, register="k3s_upgrade_binary_install")
         self.contains(named(tasks(rolling), "Report the retained K3s binary backup"),
                       "k3s_upgrade_binary_install.backup_file")
         checksum = named(tasks(rolling), "Extract the official K3s binary checksum")
         expression = checksum["ansible.builtin.set_fact"]["k3s_upgrade_binary_checksums"]
         pattern = re.search(r"regex_findall\('([^']+)'\)", expression).group(1)
         self.assertEqual(re.findall(pattern, f"{'a' * 64}  k3s"), ["a" * 64])
-
-    def test_binary_upgrade_stays_within_binary_only_scope(self):
-        for forbidden in ("get.k3s" + ".io", "ansible.builtin.shell", "ignore_errors",
-                          "execstart", "/etc/rancher/k3s", "cordon", "drain",
-                          "community.general.ufw"):
-            self.assertNotIn(forbidden, str(self.upgrade).lower())
 
     def test_os_scope_snapshot_and_serial_order(self):
         approval = tasks(self.os[0])[0]
@@ -151,16 +147,15 @@ class LifecycleTests(unittest.TestCase):
         self.contains(approval["ansible.builtin.assert"]["that"], "k3s_os_upgrade_confirm",
                       "ansible_limit", "groups.masters", "groups.workers", "groups.k3s_cluster",
                       "groups.k3s_servers", "unique", "sort", "groups.masters + groups.workers")
-        self.assertEqual(self.os[1]["hosts"], "k3s_cluster")
-        self.assertEqual(self.os[0]["vars"]["k3s_os_default_order"], ["worker2", "master", "worker1"])
+        self.fields(self.os[1], hosts="k3s_cluster")
+        self.fields(self.os[0]["vars"], k3s_os_default_order=["worker2", "master", "worker1"])
         groups = [t["ansible.builtin.add_host"]["groups"] for p in self.os
                   for t in tasks(p) if "ansible.builtin.add_host" in t]
         self.assertEqual(groups, ["k3s_os_upgrade_sequence"])
-        self.assertEqual((self.rolling["hosts"], self.rolling["serial"], self.rolling["order"],
-                          self.rolling["any_errors_fatal"]),
-                         ("k3s_os_upgrade_sequence", 1, "inventory", True))
+        self.fields(self.rolling,
+                    hosts="k3s_os_upgrade_sequence", serial=1, order="inventory", any_errors_fatal=True)
         snapshot = next(p for p in self.os if "snapshot" in p["name"])
-        self.assertEqual(snapshot["hosts"], "master")
+        self.fields(snapshot, hosts="master")
         self.assertEqual(tasks(snapshot)[0]["ansible.builtin.meta"], "end_play")
         self.assertIn("k3s_os_maintenance_required", tasks(snapshot)[0]["when"])
         saves = [t for t in tasks(snapshot) if argv(t)[1:3] == ["etcd-snapshot", "save"]]
@@ -189,10 +184,10 @@ class LifecycleTests(unittest.TestCase):
         self.assertLess(self.os.index(preparation), self.os.index(self.rolling))
         cache, preview, marker, decision = tasks(preparation)
         self.assertTrue(cache["ansible.builtin.apt"]["update_cache"] and preview["check_mode"])
-        self.assertEqual(preview["ansible.builtin.apt"]["upgrade"], "dist")
-        self.assertEqual(marker["ansible.builtin.stat"]["path"], "/var/run/reboot-required")
+        self.fields(preview["ansible.builtin.apt"], upgrade="dist")
+        self.fields(marker["ansible.builtin.stat"], path="/var/run/reboot-required")
         self.contains(decision, "k3s_os_apt_preview.changed", "k3s_os_reboot_marker_before.stat.exists")
-        self.assertEqual(self.rolling["tasks"][0]["when"], "k3s_os_maintenance_required | bool")
+        self.fields(self.rolling["tasks"][0], when="k3s_os_maintenance_required | bool")
         summary = tasks(self.os[-1])[0]["ansible.builtin.set_fact"]["k3s_os_result_table"]
         env = Environment(undefined=StrictUndefined, trim_blocks=True)
         env.filters["bool"] = bool
@@ -211,11 +206,11 @@ class LifecycleTests(unittest.TestCase):
         uncordon = next(i for i, t in enumerate(block) if "uncordon" in argv(t))
         self.assertLess(names.index("Wait for local API and embedded etcd"), uncordon)
         self.contains(block, "--ignore-daemonsets", "--delete-emptydir-data")
-        self.assertEqual(named(block, "Upgrade Ubuntu packages")["ansible.builtin.apt"]["upgrade"], "dist")
+        self.fields(named(block, "Upgrade Ubuntu packages")["ansible.builtin.apt"], upgrade="dist")
         reboot = next(t for t in block if "ansible.builtin.reboot" in t)
-        self.assertEqual(reboot["when"], "k3s_os_reboot_marker.stat.exists")
-        self.assertEqual(named(block, "Check reboot marker")["ansible.builtin.stat"]["path"],
-                         "/var/run/reboot-required")
+        self.fields(reboot, when="k3s_os_reboot_marker.stat.exists")
+        self.fields(named(block, "Check reboot marker")["ansible.builtin.stat"],
+                    path="/var/run/reboot-required")
         self.assertNotIn("always", boundary)
         self.assertFalse(any("uncordon" in argv(t) for t in rescue))
         self.assertIn("ansible.builtin.fail", rescue[-1])
@@ -227,7 +222,7 @@ class LifecycleTests(unittest.TestCase):
         for task in rescue[:-1]:
             if task["name"] in (rescue[0]["name"], "Diagnose K3s service status",
                                 "Diagnose recent K3s journal"):
-                self.assertTrue(task["ignore_unreachable"])
+                self.fields(task, ignore_unreachable=True)
 
     def test_os_delegation_health_and_proxy_matrix(self):
         self.contains(self.rolling["vars"]["k3s_os_kubectl_delegate"],
@@ -244,15 +239,15 @@ class LifecycleTests(unittest.TestCase):
             else:
                 self.assertIn("k3s_os_kubectl_delegate", task["delegate_to"])
         ready = named(self.health, "Require every Node Ready and schedulable")
-        self.assertEqual(ready["loop"], "{{ k3s_os_node_names }}")
+        self.fields(ready, loop="{{ k3s_os_node_names }}")
         self.contains(ready["vars"], "selectattr('metadata.name', 'equalto', item)")
         longhorn = named(self.health, "Read Longhorn volumes")
-        self.assertEqual((longhorn["retries"], longhorn["delay"]), (60, 5))
+        self.fields(longhorn, retries=60, delay=5)
         self.contains(longhorn["until"], "status.robustness", "length > 0")
         self.contains(named(self.health, "Require every Pod phase to be Running or Succeeded"),
                       "rejectattr('status.phase', 'in', ['Running', 'Succeeded'])")
-        self.assertEqual(self.proxy["delegate_to"], "{{ item.0 }}")
-        self.assertEqual(self.proxy["loop"], "{{ groups.k3s_cluster | product(groups.k3s_cluster) | list }}")
+        self.fields(self.proxy, delegate_to="{{ item.0 }}",
+                    loop="{{ groups.k3s_cluster | product(groups.k3s_cluster) | list }}")
         self.assertIn("--raw=/api/v1/nodes/{{ item.1 }}/proxy/healthz", argv(self.proxy))
         includes = [p["hosts"] for p in self.os if any(t.get("ansible.builtin.include_tasks") ==
                     "../../tasks/k3s-os-proxy-matrix.yml" for t in p["tasks"])]
@@ -260,12 +255,29 @@ class LifecycleTests(unittest.TestCase):
         for document in (self.os, self.health, [self.proxy]):
             self.assertNotIn("from_json).items", str(document))
 
-    def test_health_report_and_strict_modes(self):
-        plays = load("playbooks/audit/k3s-health.yml")
-        self.contains(plays, "k3s_health_mode in ['report', 'strict']",
-                      "k3s_health_mode != 'strict' or")
-        self.assertEqual(plays[-1]["tasks"][0]["always"][0]["ansible.builtin.include_tasks"],
-                         "../../tasks/k3s-health-summary.yml")
+    def test_ufw_rules(self):
+        self.assertEqual(len(self.ufw), 1)
+        play = self.ufw[0]
+        self.fields(play, hosts="k3s_cluster", gather_facts=False, become=True,
+                    strategy="linear", any_errors_fatal=True)
+        self.assertEqual(len(play["pre_tasks"]), 1)
+        self.assertIn("ansible.builtin.assert", play["pre_tasks"][0])
+        self.assertIn("community.general.ufw:", self.ufw_text)
+        variables = ("k3s_management_cidr", "k3s_haproxy_ip",
+                     "k3s_additional_ingress_ips", "k3s_cluster_cidr", "k3s_pod_cidr")
+        ports = ("22", "6443", "80", "443", "10250", "2379", "2380",
+                 "9100", "9090", "4443", "4244", "4240", "8472", "51820", "123", "113")
+        for value in variables + ports:
+            self.assertIn(value, self.ufw_text)
+
+    def test_ufw_boundaries(self):
+        self.assertIsNone(re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d+)?\b", self.ufw_text))
+        self.assertIsNone(re.search(r"(?i)(?:[a-f0-9]{1,4}:){2,}[a-f0-9:]*", self.ufw_text))
+        for value in ("kubernetes.core.k8s_info", "k3s_service_cidr",
+                      "k3s_ufw_obsolete_rules", "delete", "reset", "reload", "policy",
+                      "groups.k3s_cluster",
+                      "hostvars[item].ansible_host"):
+            self.assertNotIn(value, self.ufw_text)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,6 @@ jobs:
           esac
           python3 tests/test-cluster-scripts.py
           python3 tests/test-k3s-lifecycle.py
-          python3 tests/test-k3s-ufw.py
           ansible-playbook -i localhost, --connection=local tests/test-k3s-node-state-collection.yml
 
       - name: Compile Python helpers
