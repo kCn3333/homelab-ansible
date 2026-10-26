@@ -1,24 +1,13 @@
 # Local APT updates with systemd
 
-For a Debian/Ubuntu host running Semaphore in Docker. The script runs on the
-host, so restarting Docker does not interrupt the update process.
+Runs on the host independently of Docker. Updates packages without removals,
+cleans downloaded archives, and reports a required reboot. Never reboots.
+Exclude this host from Semaphore APT runs, e.g. with limit `all:!controller-host`
+(replace the inventory alias). Schedule outside Semaphore jobs: Docker may restart.
 
-It refreshes package lists, runs `apt-get upgrade --no-remove`, cleans downloaded
-archives, and reports a reboot marker. It stops on errors and prevents two copies
-of the script from running together. It never reboots or removes packages.
-There are no secrets or configuration files.
+## Install or update
 
-## Install
-
-Exclude the host from Semaphore APT runs: either remove it from the private
-`update_standard` and `update_automatic` groups, or set a run/template limit
-such as `all:!controller-host`, replacing `controller-host` with its inventory
-alias. With a limit, inventory can remain unchanged; apply the exclusion to
-every APT template that could select the host. Choose a time without Semaphore jobs:
-Docker updates can still interrupt jobs running inside containers. Existing
-package holds remain respected; review them if Docker updates were blocked.
-
-From the repository root, run on the target host:
+Run from the repository root on the target host:
 
 ```sh
 sudo install -m 0755 scripts/maintain-local-apt.sh /usr/local/sbin/maintain-local-apt
@@ -27,49 +16,49 @@ sudo install -m 0644 homelab/systemd/local-apt-maintenance.timer /etc/systemd/sy
 sudo systemctl daemon-reload
 ```
 
-No environment file is needed. If the earlier version was installed, remove its
-unused `/etc/local-apt-maintenance.conf` after replacing the service unit.
-
-## First run and schedule
-
-Start the service manually in a maintenance window and follow the log:
+## Manual use
 
 ```sh
-sudo systemctl start --no-block local-apt-maintenance.service
-sudo journalctl -fu local-apt-maintenance.service
+sudo maintain-local-apt --check  # Simulation using cached package lists; no changes.
+sudo maintain-local-apt         # Refresh lists, install updates, clean archives.
 ```
 
-The update continues after disconnecting SSH. Ctrl-C exits log following only.
-Verify the result with:
+Unknown arguments are rejected. Package holds remain respected.
+
+## Schedule
 
 ```sh
-sudo systemctl show local-apt-maintenance.service -p Result -p ExecMainStatus
+sudoedit /etc/systemd/system/local-apt-maintenance.timer
 ```
 
-After a successful first run, enable the timer:
+Set one `OnCalendar=` line under `[Timer]` (host's local timezone):
+
+| Frequency | Setting |
+| --- | --- |
+| Sunday at 04:55 (default) | `OnCalendar=Sun *-*-* 04:55` |
+| Daily at 03:30 | `OnCalendar=*-*-* 03:30` |
+| First day of each month at 04:55 | `OnCalendar=*-*-01 04:55` |
+
+Enable or apply a changed schedule:
 
 ```sh
-sudo systemctl enable --now local-apt-maintenance.timer
+sudo systemctl daemon-reload
+sudo systemctl enable local-apt-maintenance.timer
+sudo systemctl restart local-apt-maintenance.timer
 systemctl list-timers local-apt-maintenance.timer
 ```
 
-The example runs on Sunday at 04:55 in the host's timezone. Edit `OnCalendar`
-in the timer to change it, then run `sudo systemctl daemon-reload` and
-`sudo systemctl restart local-apt-maintenance.timer`. Missed runs are skipped.
-Avoid overlapping this schedule with other APT automation.
+`NEXT` shows the next run. Missed runs are skipped.
 
-## Logs and failures
+## Run, logs, disable
 
 ```sh
-sudo journalctl -u local-apt-maintenance.service -n 100 --no-pager
-sudo systemctl disable --now local-apt-maintenance.timer
+sudo systemctl start --no-block local-apt-maintenance.service  # Run now.
+sudo journalctl -fu local-apt-maintenance.service              # Follow output; Ctrl-C exits.
+sudo systemctl show local-apt-maintenance.service -p Result -p ExecMainStatus
+sudo systemctl disable --now local-apt-maintenance.timer      # Disable future runs only.
 ```
 
-The last command disables future runs; it does not stop an active update.
-Errors mark the service as failed. Inspect the log before retrying. No automatic
-rollback or forced timeout is used, to avoid killing dpkg during installation.
-
-Package scripts can restart Docker and other services. `needrestart` lists
-additional required service restarts without performing them; review the log
-and handle pending restarts manually. A reboot marker is reported in the log,
-without sending notifications or rebooting the host.
+Errors fail the service; inspect the journal before retrying. Updates continue
+without SSH. Review pending service restarts reported by needrestart and perform
+any reboot manually. No notifications or secrets are configured.
