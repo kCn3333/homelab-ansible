@@ -72,3 +72,36 @@
             {{ apt_remaining_preview.stdout_lines | default([]) | select('match', '^Inst ') | list | length }}
           reboot_required: >-
             {{ apt_upgrade_reboot_required.stat.exists | default(false) }}
+
+- name: Summarize safe APT updates
+  hosts: update_standard
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Build APT update result table
+      ansible.builtin.set_fact:
+        apt_upgrade_result_table: |
+          {% set width = ([4] + (ansible_play_hosts_all | map('length') | list)) | max %}
+          {{ '%-*s | %-10s | %-14s | %-15s | %s' | format(width, 'HOST', 'RESULT', 'APT UPGRADE', 'REBOOT REQUIRED', 'REMAINING') }}
+          {{ '-' * width }}-+------------+----------------+-----------------+----------
+          {% for host in ansible_play_hosts_all %}
+          {% set h = hostvars[host] %}
+          {% set upgrade = h.apt_upgrade_result | default({}) %}
+          {% set reboot = (h.apt_upgrade_reboot_required | default({})).get('stat', {}) %}
+          {% set remaining = h.apt_remaining_preview | default({}) %}
+          {% set packages = 'UNKNOWN' %}
+          {% if upgrade.get('failed', false) or upgrade.get('unreachable', false) %}
+          {% set packages = 'FAILED' %}
+          {% elif 'changed' in upgrade and not upgrade.get('skipped', false) %}
+          {% set packages = 'UPDATED' if upgrade.changed else 'UP TO DATE' %}
+          {% endif %}
+          {% set complete = remaining.get('rc', 1) == 0 %}
+          {% set count = (remaining.stdout_lines | default([]) | select('match', '^Inst ') | list | length) if complete else 'UNKNOWN' %}
+          {{ '%-*s | %-10s | %-14s | %-15s | %s' | format(width, host, 'OK' if complete else 'INCOMPLETE', packages, ('YES' if reboot.exists else 'NO') if 'exists' in reboot else 'UNKNOWN', count) }}
+          {% endfor %}
+      run_once: true
+
+    - name: Show APT update result table
+      ansible.builtin.debug:
+        msg: "{{ apt_upgrade_result_table.splitlines() }}"
+      run_once: true

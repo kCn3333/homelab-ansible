@@ -47,7 +47,11 @@ into the separate cluster project.
   proposes a removal. It does not refresh the APT cache or change the host.
 - `playbooks/maintenance/apt-upgrade.yml`: refreshes the APT cache, repeats the
   no-removal simulation as a safety gate, and installs a safe upgrade while
-  preserving held packages and existing configuration files.
+  preserving held packages and existing configuration files. After a successful
+  run, a final table lists each selected host's result, package upgrade status,
+  reboot requirement, and remaining safe-upgrade candidates. The table respects
+  `--limit`; cache refreshes alone do not count as package upgrades. The playbook
+  still stops immediately on an error before reaching the final summary.
 - `playbooks/maintenance/apt-automatic.yml`: processes one explicitly selected
   `update_automatic` host at a time, performs an APT distribution upgrade,
   removes obsolete packages with purge, runs autoclean and clean, and fails if
