@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly local APT updates
+
+[Timer]
+OnCalendar=Sun *-*-* 04:55
+# Skip missed runs instead of updating outside the maintenance window.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

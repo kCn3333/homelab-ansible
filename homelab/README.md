@@ -114,3 +114,8 @@ manage a verified known-hosts entry without discovering host keys over the
 network. The process remains deliberately two-channel: inventory and secrets
 stay private in Semaphore, and host identity is verified through a trusted
 console. Follow [`docs/host-onboarding.md`](../docs/host-onboarding.md).
+
+For a Docker host running the automation controller itself, use
+[local APT maintenance with systemd](../docs/local-apt-maintenance.md) outside
+the controller container and exclude that host from Semaphore APT runs using
+group membership or a template/run limit.

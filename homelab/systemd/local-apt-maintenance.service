@@ -1,0 +1,10 @@
+[Unit]
+Description=Local APT updates
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/maintain-local-apt
+# Do not kill a slow package installation.
+TimeoutStartSec=infinity
