@@ -5,7 +5,12 @@ set -Eeuo pipefail
 [[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 1; }
 exec 9>/run/lock/maintain-local-apt.lock
 flock -n 9 || { echo 'Another update is already running.' >&2; exit 1; }
-trap 'rc=$?; echo "APT maintenance failed (exit $rc)." >&2; exit "$rc"' ERR
+report_failure() {
+  local rc=$1
+  echo "APT maintenance failed (exit $rc)." >&2
+  exit "$rc"
+}
+trap 'report_failure "$?"' ERR
 
 export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none
 # Package scripts may restart services; needrestart only lists extra restarts.
