@@ -54,7 +54,10 @@ into the separate cluster project.
   maintenance introduces a new failed systemd unit. After reloading systemd,
   it clears only orphaned failed entries whose unit files are no longer present.
   Failed units that already existed before maintenance are reported but do not
-  incorrectly mark the APT run as failed.
+  incorrectly mark the APT run as failed. A final table lists each selected host,
+  maintenance result, whether APT upgraded packages (`UPDATED` or `UP TO DATE`),
+  and whether a reboot is required (`YES` or `NO`). Unavailable results are
+  marked `UNKNOWN`; cache refreshes and cleanup alone do not count as upgrades.
 - `playbooks/maintenance/reboot-required.yml`: reboots exactly one manually
   approved host from `reboot_approved`, then validates the reboot-required
   marker and failed systemd units after SSH connectivity returns.
@@ -73,7 +76,10 @@ stored in this repository. A completely successful run that does not require a
 reboot sends no notification. Package installation scripts may still restart
 their own services during a distribution upgrade. A host failure triggers that
 host's notification and failure result without preventing the next
-`update_automatic` host from being processed.
+`update_automatic` host from being processed. Rescued maintenance errors are
+recorded immediately and reported as failed tasks after the final table, so
+Semaphore still marks the job as failed. Unreachable hosts remain subject to
+Ansible's normal connection-failure handling.
 
 Reboots are deliberately separate from automatic APT maintenance. The
 automatic workflow only sends a notification when a reboot is required. The

@@ -184,6 +184,10 @@
           no_log: true
           when: automatic_reboot_required.stat.exists | default(false)
 
+        - name: Record successful automatic maintenance
+          ansible.builtin.set_fact:
+            automatic_maintenance_status: OK
+
         - name: Report successful automatic maintenance
           ansible.builtin.debug:
             msg:
@@ -222,6 +226,42 @@
           no_log: true
           failed_when: false
 
-        - name: Fail automatic maintenance explicitly
-          ansible.builtin.fail:
-            msg: Automatic APT maintenance failed.
+        # Defer failure until after the summary so every selected host is processed.
+        - name: Record failed automatic maintenance
+          ansible.builtin.set_fact:
+            automatic_maintenance_status: FAILED
+
+- name: Summarize automatic APT maintenance
+  hosts: update_automatic
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Build automatic maintenance result table
+      ansible.builtin.set_fact:
+        automatic_maintenance_result_table: |
+          {% set width = ([4] + (ansible_play_hosts_all | map('length') | list)) | max %}
+          {{ '%-*s | %-10s | %-14s | %s' | format(width, 'HOST', 'RESULT', 'APT UPGRADE', 'REBOOT REQUIRED') }}
+          {{ '-' * width }}-+------------+----------------+----------------
+          {% for host in ansible_play_hosts_all %}
+          {% set h = hostvars[host] %}
+          {% set upgrade = h.automatic_apt_upgrade | default({}) %}
+          {% set reboot = (h.automatic_reboot_required | default({})).get('stat', {}) %}
+          {% set packages = 'UNKNOWN' %}
+          {% if upgrade.get('failed', false) or upgrade.get('unreachable', false) %}
+          {% set packages = 'FAILED' %}
+          {% elif 'changed' in upgrade and not upgrade.get('skipped', false) %}
+          {% set packages = 'UPDATED' if upgrade.changed else 'UP TO DATE' %}
+          {% endif %}
+          {{ '%-*s | %-10s | %-14s | %s' | format(width, host, h.automatic_maintenance_status | default('INCOMPLETE'), packages, ('YES' if reboot.exists else 'NO') if 'exists' in reboot else 'UNKNOWN') }}
+          {% endfor %}
+      run_once: true
+
+    - name: Show automatic maintenance result table
+      ansible.builtin.debug:
+        msg: "{{ automatic_maintenance_result_table.splitlines() }}"
+      run_once: true
+
+    - name: Fail unsuccessful automatic maintenance after the summary
+      ansible.builtin.fail:
+        msg: Automatic APT maintenance failed. See the result table and the original task error above.
+      when: automatic_maintenance_status | default('INCOMPLETE') != 'OK'
